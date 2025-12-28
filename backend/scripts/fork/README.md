@@ -26,4 +26,14 @@ Contract addresses (with Base mainnet defaults):
 
 ### Usage
 
+Run the setup script using the npm script (works from root or backend directory):
+```bash
+npm run fork:setup
+```
+
+Or run directly:
+```bash
+tsx scripts/fork/setup-scenario.ts
+```
+
 See [docs/fork-test-hardhat.md](../../../docs/fork-test-hardhat.md) for complete usage instructions.

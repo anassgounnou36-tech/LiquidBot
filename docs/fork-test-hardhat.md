@@ -63,8 +63,10 @@ The node will fork Base mainnet and expose RPC endpoints:
 In a second terminal, run the fork setup script:
 ```bash
 npm run fork:setup
-# or
-npx ts-node backend/scripts/fork/setup-scenario.ts
+# Can be run from root or backend directory
+# From root: npm run fork:setup
+# From backend: npm run fork:setup
+# Or directly: npx ts-node backend/scripts/fork/setup-scenario.ts
 ```
 
 This script will:
