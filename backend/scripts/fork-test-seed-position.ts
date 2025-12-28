@@ -58,6 +58,13 @@ const AAVE_ORACLE = '0x2Cc0Fc26eD4563A5ce5e8bdcfe1A2878676Ae156';
 const WETH_ADDRESS = '0x4200000000000000000000000000000000000006';
 const USDC_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 
+// Constants for calculations
+const USDC_DECIMALS = 6;
+const WETH_DECIMALS = 18;
+const ORACLE_DECIMALS = 8; // Aave Oracle uses 1e8 base units
+const TARGET_HF_NUMERATOR = 100n; // Target HF = 1.02 = 102/100
+const TARGET_HF_DENOMINATOR = 102n;
+
 // ABIs (minimal interfaces)
 const WETH_ABI = [
   'function deposit() payable',
@@ -87,7 +94,8 @@ function formatAmount(amount: bigint, decimals: number, symbol: string): string 
   const whole = amount / divisor;
   const fraction = amount % divisor;
   const fractionStr = fraction.toString().padStart(decimals, '0');
-  return `${whole}.${fractionStr.slice(0, 6)} ${symbol}`;
+  const displayDecimals = Math.min(decimals, 6);
+  return `${whole}.${fractionStr.slice(0, displayDecimals)} ${symbol}`;
 }
 
 /**
@@ -216,18 +224,20 @@ async function main() {
   // Collateral value in base currency (1e8 units)
   // wethBalance is in 1e18, wethPrice is in 1e8
   // collateralValue = wethBalance * wethPrice / 1e18 (results in 1e8 base units)
-  const collateralValueBase = (wethBalance * wethPrice) / ethers.parseEther('1');
+  const wethDecimalsDivisor = 10n ** BigInt(WETH_DECIMALS);
+  const collateralValueBase = (wethBalance * wethPrice) / wethDecimalsDivisor;
 
   // Apply liquidation threshold (in bps, need to divide by 10000)
   const collateralAdjusted = (collateralValueBase * liquidationThreshold) / 10000n;
 
   // Target HF = 1.02 = 102/100
   // debt = collateralAdjusted / 1.02 = collateralAdjusted * 100 / 102
-  const targetDebtBase = (collateralAdjusted * 100n) / 102n;
+  const targetDebtBase = (collateralAdjusted * TARGET_HF_NUMERATOR) / TARGET_HF_DENOMINATOR;
 
   // Convert debt from base currency (1e8) to USDC amount (1e6)
   // debtUSDC = targetDebtBase * 1e6 / usdcPrice
-  const borrowAmountUSDC = (targetDebtBase * 1000000n) / usdcPrice;
+  const usdcDecimalsMultiplier = 10n ** BigInt(USDC_DECIMALS);
+  const borrowAmountUSDC = (targetDebtBase * usdcDecimalsMultiplier) / usdcPrice;
 
   console.log('Collateral Value (base):', formatAmount(collateralValueBase, 8, 'USD'));
   console.log('Collateral Adjusted (LT):', formatAmount(collateralAdjusted, 8, 'USD'));
