@@ -45,7 +45,8 @@
     "audit:wrapped": "node -r dotenv/config scripts/audit-wrapped-eth-prices.mjs",
     "test:repay": "node -r dotenv/config scripts/e2e-repay-sanity.mjs",
     "accel:smoke": "API_KEY=smoke-test JWT_SECRET=smoke-test-secret USE_MOCK_SUBGRAPH=true tsx scripts/e2e-accel-smoke.ts --dry-run",
-    "diag": "tsx scripts/startup-diag.ts"
+    "diag": "tsx scripts/startup-diag.ts",
+    "fork:setup": "tsx scripts/fork/setup-scenario.ts"
   },
   "dependencies": {
     "@apollo/client": "^3.10.0",

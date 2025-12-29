@@ -1,0 +1,272 @@
+import { ethers } from "ethers";
+import * as dotenv from "dotenv";
+
+dotenv.config();
+
+// Base mainnet addresses (fallbacks align with your existing .env)
+const WETH = process.env.WETH_ADDRESS || "0x4200000000000000000000000000000000000006";
+const USDC = process.env.USDC_ADDRESS || "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const AAVE_POOL = process.env.AAVE_POOL || process.env.AAVE_POOL_ADDRESS || "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5";
+const AAVE_ORACLE = process.env.AAVE_ORACLE || "0x2Cc0Fc26eD4563A5ce5e8bdcfe1A2878676Ae156";
+const PROTOCOL_DATA_PROVIDER = process.env.AAVE_PROTOCOL_DATA_PROVIDER || "0xC4Fcf9893072d61Cc2899C0054877Cb752587981";
+
+// Local hardhat node RPC + test key
+const RPC = process.env.RPC_URL || "http://127.0.0.1:8545";
+const TEST_PK = process.env.FORK_TEST_PK || process.env.TEST_PK || "";
+
+// Optional script knobs
+const ETH_DEPOSIT = process.env.FORK_TEST_ETH_DEPOSIT || "1.0"; // ETH to wrap into WETH
+const TARGET_HF_BPS = process.env.FORK_TEST_TARGET_HF_BPS || "10200"; // default 1.02 * 10000
+const SECOND_BORROW_BPS = process.env.FORK_TEST_SECOND_BORROW_BPS || ""; // e.g. "10080" for ~1.008
+
+// Minimal ABIs
+const wethAbi = [
+  "function deposit() payable",
+  "function approve(address spender,uint256 amount) returns (bool)",
+  "function balanceOf(address) view returns (uint256)"
+];
+const erc20Abi = [
+  "function approve(address spender,uint256 amount) returns (bool)",
+  "function balanceOf(address) view returns (uint256)",
+  "function decimals() view returns (uint8)"
+];
+const poolAbi = [
+  "function supply(address asset,uint256 amount,address onBehalfOf,uint16 referralCode)",
+  "function borrow(address asset,uint256 amount,uint256 interestRateMode,uint16 referralCode,address onBehalfOf)",
+  "function getUserAccountData(address user) view returns (uint256 totalCollateralBase, uint256 totalDebtBase, uint256 availableBorrowsBase, uint256 currentLiquidationThreshold, uint256 ltv, uint256 healthFactor)"
+];
+const oracleAbi = [
+  "function getAssetPrice(address asset) view returns (uint256)"
+];
+const dataProviderAbi = [
+  "function getReserveConfigurationData(address asset) view returns (uint256 decimals,uint256 reserveFactor,uint256 baseLTVasCollateral,uint256 liquidationThreshold,uint256 liquidationBonus,uint256 debtCeiling,uint8 eModeCategory,bool isPaused,bool isActive,bool isFrozen)",
+  "function getUserReserveData(address asset, address user) view returns (uint256 currentATokenBalance, uint256 currentStableDebt, uint256 currentVariableDebt, uint256 principalStableDebt, uint256 scaledVariableDebt, uint256 stableBorrowRate, uint256 liquidityRate, uint40 stableRateLastUpdated, bool usageAsCollateralEnabled)"
+];
+
+function formatUsdE8(x: bigint): string {
+  // display with 2 decimals from 1e8 scaling
+  const s = x.toString().padStart(3, "0");
+  const i = s.length - 8;
+  const whole = i > 0 ? s.slice(0, i) : "0";
+  const frac = i > 0 ? s.slice(i, i + 2) : s.padStart(8, "0").slice(0, 2);
+  return `${whole}.${frac}`;
+}
+
+async function computeBorrowAmountUsdc6(
+  wethWei: bigint,
+  priceWeth_e8: bigint,
+  priceUsdc_e8: bigint,
+  ltBps: bigint,
+  targetHFbps: bigint
+): Promise<bigint> {
+  // HF ≈ (collateral_value_usd * LTbps) / debt_value_usd
+  // collateral_value_usd_e8 = priceWeth * amountWethWei / 1e18
+  const collateralUsd_e8 = (priceWeth_e8 * wethWei) / BigInt(10 ** 18);
+  const debtUsd_e8 = (collateralUsd_e8 * ltBps) / targetHFbps;
+  let amountUsdc6 = (debtUsd_e8 * BigInt(10 ** 6)) / priceUsdc_e8;
+  // safety margin so HF > 1.0 by a hair
+  amountUsdc6 = (amountUsdc6 * BigInt(99)) / BigInt(100);
+  return amountUsdc6;
+}
+
+async function main() {
+  if (!TEST_PK) {
+    console.error("FORK_TEST_PK (or TEST_PK) is required in .env to run the fork setup.");
+    process.exit(1);
+  }
+
+  const provider = new ethers.JsonRpcProvider(RPC);
+  const wallet = new ethers.Wallet(TEST_PK, provider);
+  console.log("Using test wallet:", wallet.address);
+  
+  // Test RPC connection
+  console.log("\n[0/7] Testing RPC connection...");
+  try {
+    const network = await provider.getNetwork();
+    console.log(`✓ Connected to network with chainId: ${network.chainId}`);
+    if (network.chainId !== 8453n) {
+      console.warn(`⚠️  Warning: Expected chainId 8453 (Base), but got ${network.chainId}`);
+      console.warn("   Make sure the Hardhat fork is configured correctly.");
+    }
+  } catch (error) {
+    console.error("✗ Failed to connect to RPC endpoint!");
+    console.error(`   RPC_URL: ${RPC}`);
+    console.error("\n   Please ensure:");
+    console.error("   1. The Hardhat fork node is running: npm run hardhat:node");
+    console.error("   2. RPC_URL in .env points to http://127.0.0.1:8545");
+    console.error(`\n   Error: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+
+  const weth = new ethers.Contract(WETH, wethAbi, wallet);
+  const usdc = new ethers.Contract(USDC, erc20Abi, wallet);
+  const pool = new ethers.Contract(AAVE_POOL, poolAbi, wallet);
+  const oracle = new ethers.Contract(AAVE_ORACLE, oracleAbi, wallet);
+  const dataProvider = new ethers.Contract(PROTOCOL_DATA_PROVIDER, dataProviderAbi, wallet);
+
+  // Check if user already has a position
+  console.log("\n[1/7] Checking existing position...");
+  try {
+    const userData = await pool.getUserAccountData(wallet.address);
+    const existingCollateral = userData.totalCollateralBase;
+    const existingDebt = userData.totalDebtBase;
+    
+    if (existingCollateral > 0n || existingDebt > 0n) {
+      console.log("⚠️  WARNING: This wallet already has an Aave position!");
+      console.log(`   Collateral: ${existingCollateral.toString()} (base units)`);
+      console.log(`   Debt: ${existingDebt.toString()} (base units)`);
+      console.log("\n   To create a fresh position:");
+      console.log("   1. Stop the Hardhat node (Ctrl+C)");
+      console.log("   2. Restart it with: npm run hardhat:node");
+      console.log("   3. Run this script again");
+      console.log("\n   Or use a different wallet by setting FORK_TEST_PK to a different Hardhat account.");
+      process.exit(1);
+    }
+    console.log("✓ No existing position found, proceeding with setup...");
+  } catch (error) {
+    console.error("✗ Failed to check existing position!");
+    console.error("   This might indicate the Hardhat fork isn't properly initialized.");
+    console.error("\n   Please ensure:");
+    console.error("   1. The Hardhat fork is running: npm run hardhat:node");
+    console.error("   2. HARDHAT_FORK_URL in .env points to a valid Base RPC");
+    console.error("   3. The fork has successfully connected to Base mainnet");
+    console.error(`\n   Error: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+
+  // 1) Wrap ETH -> WETH
+  console.log(`\n[2/7] Wrapping ETH -> WETH: ${ETH_DEPOSIT} ETH`);
+  const depTx = await weth.deposit({ value: ethers.parseEther(ETH_DEPOSIT) });
+  await depTx.wait();
+  const wethBal = await weth.balanceOf(wallet.address);
+  console.log("WETH balance:", ethers.formatEther(wethBal));
+
+  // 2) Approve & supply WETH to Aave v3 Pool
+  console.log("\n[3/7] Approving Aave Pool for WETH...");
+  await (await weth.approve(AAVE_POOL, wethBal)).wait();
+  console.log("Supplying WETH to Aave v3 Pool...");
+  await (await pool.supply(WETH, wethBal, wallet.address, 0)).wait();
+
+  // 3) Read prices & liquidation threshold
+  console.log("\n[4/7] Reading Aave Oracle prices (1e8) and WETH liquidationThreshold (bps)...");
+  const priceWeth_e8 = BigInt(await oracle.getAssetPrice(WETH));
+  const priceUsdc_e8 = BigInt(await oracle.getAssetPrice(USDC));
+  const cfg = await dataProvider.getReserveConfigurationData(WETH);
+  let ltBps = BigInt(cfg.liquidationThreshold);
+  
+  // Validate liquidation threshold - should be between 50-90% for WETH
+  if (ltBps < 5000n || ltBps > 9000n) {
+    console.warn(`⚠️  Warning: Unusual liquidation threshold: ${ltBps} bps`);
+    console.warn("   Expected range: 5000-9000 bps (50-90%)");
+    console.warn("   This might indicate a fork initialization issue.");
+    console.warn("   Using fallback value of 8000 bps (80%) for safety.");
+    ltBps = 8000n;
+  }
+  
+  console.log(
+    `WETH=${formatUsdE8(priceWeth_e8)} USD (1e8), USDC=${formatUsdE8(priceUsdc_e8)} USD (1e8), LTbps=${ltBps}`
+  );
+  
+  // Validate prices are reasonable
+  if (priceWeth_e8 < 100000000n || priceWeth_e8 > 1000000000000n) {
+    console.error("✗ WETH price seems unreasonable!");
+    console.error(`   Got: ${formatUsdE8(priceWeth_e8)} USD`);
+    console.error("   Expected range: ~$1,000 - $10,000");
+    console.error("\n   Please check that the fork is properly connected to Base mainnet.");
+    process.exit(1);
+  }
+  
+  if (priceUsdc_e8 < 90000000n || priceUsdc_e8 > 110000000n) {
+    console.warn(`⚠️  Warning: USDC price seems off: ${formatUsdE8(priceUsdc_e8)} USD`);
+    console.warn("   Expected: ~$1.00 (0.90 - 1.10)");
+  }
+
+  // 4) Compute & borrow (target HF ≈ TARGET_HF_BPS)
+  console.log("\n[5/7] Computing initial USDC borrow for target HF bps:", TARGET_HF_BPS);
+  const targetHFbps = BigInt(TARGET_HF_BPS);
+  const amountUsdc6 = await computeBorrowAmountUsdc6(
+    BigInt(wethBal),
+    priceWeth_e8,
+    priceUsdc_e8,
+    ltBps,
+    targetHFbps
+  );
+  
+  // Sanity check the borrow amount
+  const collateralValueUsd = (priceWeth_e8 * BigInt(wethBal)) / BigInt(10 ** 18);
+  const borrowValueUsd = (priceUsdc_e8 * amountUsdc6) / BigInt(10 ** 6);
+  const expectedHF = (collateralValueUsd * ltBps) / (borrowValueUsd * 10000n);
+  
+  console.log(`Borrowing ~${amountUsdc6.toString()} USDC (6d)`);
+  console.log(`Collateral value: $${formatUsdE8(collateralValueUsd)} USD`);
+  console.log(`Borrow value: $${formatUsdE8(borrowValueUsd)} USD`);
+  console.log(`Expected HF: ~${Number(expectedHF) / 100}%`);
+  
+  if (amountUsdc6 > BigInt(10 ** 12)) {
+    console.error("✗ Borrow amount seems unreasonably large!");
+    console.error(`   Calculated: ${amountUsdc6.toString()} USDC (${ethers.formatUnits(amountUsdc6, 6)} USDC)`);
+    console.error("\n   This usually indicates an issue with:");
+    console.error("   1. Liquidation threshold value from the fork");
+    console.error("   2. Oracle prices not properly initialized");
+    console.error("\n   Try:");
+    console.error("   1. Restart the fork: npm run hardhat:node");
+    console.error("   2. Wait a few seconds for fork to fully initialize");
+    console.error("   3. Run this script again");
+    process.exit(1);
+  }
+  
+  try {
+    await (await pool.borrow(USDC, amountUsdc6, 2, 0, wallet.address)).wait();
+  } catch (error) {
+    console.error("\n✗ Borrow transaction failed!");
+    console.error(`   Error: ${error instanceof Error ? error.message : String(error)}`);
+    console.error("\n   Common causes:");
+    console.error("   1. Borrow amount exceeds available liquidity in Aave pool");
+    console.error("   2. Health factor would be too low (< 1.0)");
+    console.error("   3. USDC reserve is frozen or borrowing is paused");
+    console.error("\n   Suggestions:");
+    console.error("   - Try reducing FORK_TEST_ETH_DEPOSIT (e.g., 0.5 or 0.1)");
+    console.error("   - Try increasing FORK_TEST_TARGET_HF_BPS (e.g., 11000 for HF=1.10)");
+    console.error("   - Ensure the fork is properly connected to Base mainnet");
+    throw error;
+  }
+  
+  const usdcBal1 = await usdc.balanceOf(wallet.address);
+  console.log("USDC balance after initial borrow:", usdcBal1.toString());
+
+  // 5) Optional: second small borrow to push HF closer to 1.005–1.01
+  if (SECOND_BORROW_BPS) {
+    console.log("\n[6/7] Performing optional second borrow to tighten HF, target bps:", SECOND_BORROW_BPS);
+    const secondTarget = BigInt(SECOND_BORROW_BPS);
+    const amountUsdc6b = await computeBorrowAmountUsdc6(
+      BigInt(wethBal),
+      priceWeth_e8,
+      priceUsdc_e8,
+      ltBps,
+      secondTarget
+    );
+    // only borrow the delta beyond the first borrow
+    const delta = amountUsdc6b > amountUsdc6 ? (amountUsdc6b - amountUsdc6) : BigInt(0);
+    if (delta > BigInt(0)) {
+      console.log(`Second borrow delta: ${delta.toString()} USDC (6d)`);
+      await (await pool.borrow(USDC, delta, 2, 0, wallet.address)).wait();
+    } else {
+      console.log("Second borrow skipped (delta <= 0)");
+    }
+    const usdcBal2 = await usdc.balanceOf(wallet.address);
+    console.log("USDC balance after second borrow:", usdcBal2.toString());
+  } else {
+    console.log("\n[6/7] Skipping second borrow (FORK_TEST_SECOND_BORROW_BPS not set)");
+  }
+
+  console.log("\n[7/7] Setup complete.");
+  console.log("Next steps:");
+  console.log("  • Start bot with PYTH_ENABLED=true (Pyth WS) and all RPCs pointing to http://127.0.0.1:8545");
+  console.log("  • Ensure USE_FLASHBLOCKS=false and EXECUTE=false for safe testing");
+  console.log("  • Watch /metrics for predictive/price-trigger counters and min HF movements");
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

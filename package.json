@@ -17,6 +17,16 @@
     "contracts:verify": "cd contracts && npm run verify:executor",
     "contracts:deploy": "cd contracts && npm run deploy:executor",
     "test": "cd backend && npm test",
-    "test:all": "npm run contracts:test && npm run test"
+    "test:all": "npm run contracts:test && npm run test",
+    "hardhat:node": "hardhat node",
+    "fork:setup": "ts-node backend/scripts/fork/setup-scenario.ts"
+  },
+  "devDependencies": {
+    "hardhat": "^2.22.2",
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "ethers": "^6.10.0",
+    "typescript": "^5.6.3",
+    "ts-node": "^10.9.2",
+    "dotenv": "^16.4.5"
   }
 }
