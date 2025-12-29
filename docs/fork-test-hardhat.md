@@ -73,36 +73,43 @@ npm run fork:setup
 **Important:** The script checks for existing positions. If you've already run it, restart the Hardhat node first to reset the fork state.
 
 This script will:
-0. Check if wallet already has an Aave position (exits if found)
-1. Wrap ETH → WETH via `deposit()`
-2. Approve and supply WETH as collateral to Aave v3 Pool
-3. Read Aave Oracle prices and liquidation threshold
-4. Compute USDC borrow amount for target Health Factor (~1.02)
-5. Execute initial borrow
-6. (Optional) Execute second borrow to tighten HF further (~1.008)
+0. Test RPC connection and verify chainId
+1. Check if wallet already has an Aave position (exits if found)
+2. Wrap ETH → WETH via `deposit()`
+3. Approve and supply WETH as collateral to Aave v3 Pool
+4. Read Aave Oracle prices and liquidation threshold
+5. Compute USDC borrow amount for target Health Factor (~1.02)
+6. Execute initial borrow
+7. (Optional) Execute second borrow to tighten HF further (~1.008)
 
 Expected output:
 ```
 Using test wallet: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
 
-[1/6] Wrapping ETH -> WETH: 1.0 ETH
+[0/7] Testing RPC connection...
+✓ Connected to network with chainId: 8453
+
+[1/7] Checking existing position...
+✓ No existing position found, proceeding with setup...
+
+[2/7] Wrapping ETH -> WETH: 1.0 ETH
 WETH balance: 1.0
 
-[2/6] Approving Aave Pool for WETH...
+[3/7] Approving Aave Pool for WETH...
 Supplying WETH to Aave v3 Pool...
 
-[3/6] Reading Aave Oracle prices (1e8) and WETH liquidationThreshold (bps)...
+[4/7] Reading Aave Oracle prices (1e8) and WETH liquidationThreshold (bps)...
 WETH=3200.00 USD (1e8), USDC=1.00 USD (1e8), LTbps=8000
 
-[4/6] Computing initial USDC borrow for target HF bps: 10200
+[5/7] Computing initial USDC borrow for target HF bps: 10200
 Borrowing ~2509803921 USDC (6d)
 USDC balance after initial borrow: 2509803921
 
-[5/6] Performing optional second borrow to tighten HF, target bps: 10080
+[6/7] Performing optional second borrow to tighten HF, target bps: 10080
 Second borrow delta: 29761904 USDC (6d)
 USDC balance after second borrow: 2539565825
 
-[6/6] Setup complete.
+[7/7] Setup complete.
 Next steps:
   • Start bot with PYTH_ENABLED=true and all RPCs pointing to http://127.0.0.1:8545
   • Ensure USE_FLASHBLOCKS=false and EXECUTE=false for safe testing
@@ -186,6 +193,34 @@ npx tsx scripts/fork/setup-scenario.ts
 # Or use the npm script (recommended):
 npm run fork:setup
 ```
+
+### "Failed to connect to RPC endpoint" or "missing revert data"
+This error occurs when the script can't connect to the Hardhat fork node.
+
+**Symptoms:**
+- `Error: missing revert data`
+- `Failed to connect to RPC endpoint`
+- Connection refused errors
+
+**Solution:**
+1. **Check if Hardhat node is running:**
+   - Open a terminal and run: `npm run hardhat:node`
+   - You should see output like "Started HTTP and WebSocket JSON-RPC server at http://127.0.0.1:8545/"
+
+2. **Verify RPC_URL in .env:**
+   ```bash
+   RPC_URL=http://127.0.0.1:8545
+   ```
+
+3. **Check HARDHAT_FORK_URL:**
+   - Ensure you have a valid Base RPC endpoint in `.env`:
+   ```bash
+   HARDHAT_FORK_URL=https://base-mainnet.g.alchemy.com/v2/YOUR_API_KEY
+   ```
+
+4. **Wait for fork initialization:**
+   - The Hardhat fork may take a few seconds to initialize
+   - Wait until you see "Forked base-mainnet" in the Hardhat node output
 
 ### "nonce has already been used" error
 This occurs when running the setup script multiple times against the same Hardhat fork instance. The script now checks for existing positions and will warn you.

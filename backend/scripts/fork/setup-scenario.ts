@@ -78,6 +78,25 @@ async function main() {
   const provider = new ethers.JsonRpcProvider(RPC);
   const wallet = new ethers.Wallet(TEST_PK, provider);
   console.log("Using test wallet:", wallet.address);
+  
+  // Test RPC connection
+  console.log("\n[0/7] Testing RPC connection...");
+  try {
+    const network = await provider.getNetwork();
+    console.log(`✓ Connected to network with chainId: ${network.chainId}`);
+    if (network.chainId !== 8453n) {
+      console.warn(`⚠️  Warning: Expected chainId 8453 (Base), but got ${network.chainId}`);
+      console.warn("   Make sure the Hardhat fork is configured correctly.");
+    }
+  } catch (error) {
+    console.error("✗ Failed to connect to RPC endpoint!");
+    console.error(`   RPC_URL: ${RPC}`);
+    console.error("\n   Please ensure:");
+    console.error("   1. The Hardhat fork node is running: npm run hardhat:node");
+    console.error("   2. RPC_URL in .env points to http://127.0.0.1:8545");
+    console.error(`\n   Error: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
 
   const weth = new ethers.Contract(WETH, wethAbi, wallet);
   const usdc = new ethers.Contract(USDC, erc20Abi, wallet);
@@ -86,39 +105,50 @@ async function main() {
   const dataProvider = new ethers.Contract(PROTOCOL_DATA_PROVIDER, dataProviderAbi, wallet);
 
   // Check if user already has a position
-  console.log("\n[0/6] Checking existing position...");
-  const userData = await pool.getUserAccountData(wallet.address);
-  const existingCollateral = userData.totalCollateralBase;
-  const existingDebt = userData.totalDebtBase;
-  
-  if (existingCollateral > 0n || existingDebt > 0n) {
-    console.log("⚠️  WARNING: This wallet already has an Aave position!");
-    console.log(`   Collateral: ${existingCollateral.toString()} (base units)`);
-    console.log(`   Debt: ${existingDebt.toString()} (base units)`);
-    console.log("\n   To create a fresh position:");
-    console.log("   1. Stop the Hardhat node (Ctrl+C)");
-    console.log("   2. Restart it with: npm run hardhat:node");
-    console.log("   3. Run this script again");
-    console.log("\n   Or use a different wallet by setting FORK_TEST_PK to a different Hardhat account.");
+  console.log("\n[1/7] Checking existing position...");
+  try {
+    const userData = await pool.getUserAccountData(wallet.address);
+    const existingCollateral = userData.totalCollateralBase;
+    const existingDebt = userData.totalDebtBase;
+    
+    if (existingCollateral > 0n || existingDebt > 0n) {
+      console.log("⚠️  WARNING: This wallet already has an Aave position!");
+      console.log(`   Collateral: ${existingCollateral.toString()} (base units)`);
+      console.log(`   Debt: ${existingDebt.toString()} (base units)`);
+      console.log("\n   To create a fresh position:");
+      console.log("   1. Stop the Hardhat node (Ctrl+C)");
+      console.log("   2. Restart it with: npm run hardhat:node");
+      console.log("   3. Run this script again");
+      console.log("\n   Or use a different wallet by setting FORK_TEST_PK to a different Hardhat account.");
+      process.exit(1);
+    }
+    console.log("✓ No existing position found, proceeding with setup...");
+  } catch (error) {
+    console.error("✗ Failed to check existing position!");
+    console.error("   This might indicate the Hardhat fork isn't properly initialized.");
+    console.error("\n   Please ensure:");
+    console.error("   1. The Hardhat fork is running: npm run hardhat:node");
+    console.error("   2. HARDHAT_FORK_URL in .env points to a valid Base RPC");
+    console.error("   3. The fork has successfully connected to Base mainnet");
+    console.error(`\n   Error: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);
   }
-  console.log("✓ No existing position found, proceeding with setup...");
 
   // 1) Wrap ETH -> WETH
-  console.log(`\n[1/6] Wrapping ETH -> WETH: ${ETH_DEPOSIT} ETH`);
+  console.log(`\n[2/7] Wrapping ETH -> WETH: ${ETH_DEPOSIT} ETH`);
   const depTx = await weth.deposit({ value: ethers.parseEther(ETH_DEPOSIT) });
   await depTx.wait();
   const wethBal = await weth.balanceOf(wallet.address);
   console.log("WETH balance:", ethers.formatEther(wethBal));
 
   // 2) Approve & supply WETH to Aave v3 Pool
-  console.log("\n[2/6] Approving Aave Pool for WETH...");
+  console.log("\n[3/7] Approving Aave Pool for WETH...");
   await (await weth.approve(AAVE_POOL, wethBal)).wait();
   console.log("Supplying WETH to Aave v3 Pool...");
   await (await pool.supply(WETH, wethBal, wallet.address, 0)).wait();
 
   // 3) Read prices & liquidation threshold
-  console.log("\n[3/6] Reading Aave Oracle prices (1e8) and WETH liquidationThreshold (bps)...");
+  console.log("\n[4/7] Reading Aave Oracle prices (1e8) and WETH liquidationThreshold (bps)...");
   const priceWeth_e8 = BigInt(await oracle.getAssetPrice(WETH));
   const priceUsdc_e8 = BigInt(await oracle.getAssetPrice(USDC));
   const cfg = await dataProvider.getReserveConfigurationData(WETH);
@@ -128,7 +158,7 @@ async function main() {
   );
 
   // 4) Compute & borrow (target HF ≈ TARGET_HF_BPS)
-  console.log("\n[4/6] Computing initial USDC borrow for target HF bps:", TARGET_HF_BPS);
+  console.log("\n[5/7] Computing initial USDC borrow for target HF bps:", TARGET_HF_BPS);
   const targetHFbps = BigInt(TARGET_HF_BPS);
   const amountUsdc6 = await computeBorrowAmountUsdc6(
     BigInt(wethBal),
@@ -144,7 +174,7 @@ async function main() {
 
   // 5) Optional: second small borrow to push HF closer to 1.005–1.01
   if (SECOND_BORROW_BPS) {
-    console.log("\n[5/6] Performing optional second borrow to tighten HF, target bps:", SECOND_BORROW_BPS);
+    console.log("\n[6/7] Performing optional second borrow to tighten HF, target bps:", SECOND_BORROW_BPS);
     const secondTarget = BigInt(SECOND_BORROW_BPS);
     const amountUsdc6b = await computeBorrowAmountUsdc6(
       BigInt(wethBal),
@@ -164,10 +194,10 @@ async function main() {
     const usdcBal2 = await usdc.balanceOf(wallet.address);
     console.log("USDC balance after second borrow:", usdcBal2.toString());
   } else {
-    console.log("\n[5/6] Skipping second borrow (FORK_TEST_SECOND_BORROW_BPS not set)");
+    console.log("\n[6/7] Skipping second borrow (FORK_TEST_SECOND_BORROW_BPS not set)");
   }
 
-  console.log("\n[6/6] Setup complete.");
+  console.log("\n[7/7] Setup complete.");
   console.log("Next steps:");
   console.log("  • Start bot with PYTH_ENABLED=true (Pyth WS) and all RPCs pointing to http://127.0.0.1:8545");
   console.log("  • Ensure USE_FLASHBLOCKS=false and EXECUTE=false for safe testing");
