@@ -32,13 +32,15 @@ const erc20Abi = [
 ];
 const poolAbi = [
   "function supply(address asset,uint256 amount,address onBehalfOf,uint16 referralCode)",
-  "function borrow(address asset,uint256 amount,uint256 interestRateMode,uint16 referralCode,address onBehalfOf)"
+  "function borrow(address asset,uint256 amount,uint256 interestRateMode,uint16 referralCode,address onBehalfOf)",
+  "function getUserAccountData(address user) view returns (uint256 totalCollateralBase, uint256 totalDebtBase, uint256 availableBorrowsBase, uint256 currentLiquidationThreshold, uint256 ltv, uint256 healthFactor)"
 ];
 const oracleAbi = [
   "function getAssetPrice(address asset) view returns (uint256)"
 ];
 const dataProviderAbi = [
-  "function getReserveConfigurationData(address asset) view returns (uint256 decimals,uint256 reserveFactor,uint256 baseLTVasCollateral,uint256 liquidationThreshold,uint256 liquidationBonus,uint256 debtCeiling,uint8 eModeCategory,bool isPaused,bool isActive,bool isFrozen)"
+  "function getReserveConfigurationData(address asset) view returns (uint256 decimals,uint256 reserveFactor,uint256 baseLTVasCollateral,uint256 liquidationThreshold,uint256 liquidationBonus,uint256 debtCeiling,uint8 eModeCategory,bool isPaused,bool isActive,bool isFrozen)",
+  "function getUserReserveData(address asset, address user) view returns (uint256 currentATokenBalance, uint256 currentStableDebt, uint256 currentVariableDebt, uint256 principalStableDebt, uint256 scaledVariableDebt, uint256 stableBorrowRate, uint256 liquidityRate, uint40 stableRateLastUpdated, bool usageAsCollateralEnabled)"
 ];
 
 function formatUsdE8(x: bigint): string {
@@ -82,6 +84,25 @@ async function main() {
   const pool = new ethers.Contract(AAVE_POOL, poolAbi, wallet);
   const oracle = new ethers.Contract(AAVE_ORACLE, oracleAbi, wallet);
   const dataProvider = new ethers.Contract(PROTOCOL_DATA_PROVIDER, dataProviderAbi, wallet);
+
+  // Check if user already has a position
+  console.log("\n[0/6] Checking existing position...");
+  const userData = await pool.getUserAccountData(wallet.address);
+  const existingCollateral = userData.totalCollateralBase;
+  const existingDebt = userData.totalDebtBase;
+  
+  if (existingCollateral > 0n || existingDebt > 0n) {
+    console.log("⚠️  WARNING: This wallet already has an Aave position!");
+    console.log(`   Collateral: ${existingCollateral.toString()} (base units)`);
+    console.log(`   Debt: ${existingDebt.toString()} (base units)`);
+    console.log("\n   To create a fresh position:");
+    console.log("   1. Stop the Hardhat node (Ctrl+C)");
+    console.log("   2. Restart it with: npm run hardhat:node");
+    console.log("   3. Run this script again");
+    console.log("\n   Or use a different wallet by setting FORK_TEST_PK to a different Hardhat account.");
+    process.exit(1);
+  }
+  console.log("✓ No existing position found, proceeding with setup...");
 
   // 1) Wrap ETH -> WETH
   console.log(`\n[1/6] Wrapping ETH -> WETH: ${ETH_DEPOSIT} ETH`);

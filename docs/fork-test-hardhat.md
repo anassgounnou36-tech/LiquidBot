@@ -63,13 +63,17 @@ The node will fork Base mainnet and expose RPC endpoints:
 In a second terminal, run the fork setup script:
 ```bash
 npm run fork:setup
-# Can be run from root or backend directory
-# From root: npm run fork:setup
-# From backend: npm run fork:setup
-# Or directly: npx ts-node backend/scripts/fork/setup-scenario.ts
+# Works from root or backend directory
+
+# Or use npx directly (useful on Windows):
+# From root: npx ts-node backend/scripts/fork/setup-scenario.ts
+# From backend: npx tsx scripts/fork/setup-scenario.ts
 ```
 
+**Important:** The script checks for existing positions. If you've already run it, restart the Hardhat node first to reset the fork state.
+
 This script will:
+0. Check if wallet already has an Aave position (exits if found)
 1. Wrap ETH → WETH via `deposit()`
 2. Approve and supply WETH as collateral to Aave v3 Pool
 3. Read Aave Oracle prices and liquidation threshold
@@ -169,6 +173,29 @@ Run the setup script multiple times with different `FORK_TEST_PK` values to crea
 
 ### "FORK_TEST_PK is required"
 Ensure `FORK_TEST_PK` or `TEST_PK` is set in your `.env` file.
+
+### "ts-node is not recognized" or "tsx is not recognized" (Windows)
+On Windows, you need to use `npx` to run TypeScript executables:
+```bash
+# From root directory
+npx ts-node backend/scripts/fork/setup-scenario.ts
+
+# From backend directory
+npx tsx scripts/fork/setup-scenario.ts
+
+# Or use the npm script (recommended):
+npm run fork:setup
+```
+
+### "nonce has already been used" error
+This occurs when running the setup script multiple times against the same Hardhat fork instance. The script now checks for existing positions and will warn you.
+
+**Solution:**
+1. Stop the Hardhat node (Ctrl+C)
+2. Restart it: `npm run hardhat:node`
+3. Run the setup script again: `npm run fork:setup`
+
+**Alternative:** Use a different test wallet by changing `FORK_TEST_PK` to another Hardhat default account.
 
 ### "execution reverted: SafeERC20: low-level call failed"
 The fork URL might be incorrect or blocked. Verify `HARDHAT_FORK_URL` points to a valid Base RPC endpoint.
