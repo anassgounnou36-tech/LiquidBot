@@ -232,6 +232,47 @@ This occurs when running the setup script multiple times against the same Hardha
 
 **Alternative:** Use a different test wallet by changing `FORK_TEST_PK` to another Hardhat default account.
 
+### "execution reverted" or "unknown custom error" when borrowing
+This error occurs during the borrow step, often with error code `0x6679996d` or similar Aave custom errors.
+
+**Symptoms:**
+- Script completes supply step successfully
+- Fails at "Borrowing ~X USDC" step
+- Error: "execution reverted (unknown custom error)"
+
+**Common causes:**
+1. **Liquidation threshold issue**: Fork may return incorrect liquidation threshold values
+2. **Insufficient liquidity**: Not enough USDC available in Aave pool on the fork
+3. **Health factor too low**: Calculated borrow amount would result in HF < 1.0
+
+**Solutions:**
+
+**Option 1: Use Anvil instead of Hardhat** (Recommended)
+Anvil (from Foundry) often has better fork compatibility:
+```bash
+# Install Foundry if not already installed
+curl -L https://foundry.paradigm.xyz | bash
+foundryup
+
+# Start Anvil fork (replaces hardhat node)
+anvil --fork-url https://base-mainnet.g.alchemy.com/v2/YOUR_API_KEY --chain-id 8453
+```
+
+**Option 2: Reduce collateral amount**
+```bash
+# In .env file
+FORK_TEST_ETH_DEPOSIT=0.5  # or 0.1
+```
+
+**Option 3: Increase target health factor**
+```bash
+# In .env file
+FORK_TEST_TARGET_HF_BPS=11000  # HF = 1.10 (more conservative)
+```
+
+**Option 4: Use different RPC endpoint**
+Try a different Base RPC provider (Alchemy, QuickNode, Infura)
+
 ### "execution reverted: SafeERC20: low-level call failed"
 The fork URL might be incorrect or blocked. Verify `HARDHAT_FORK_URL` points to a valid Base RPC endpoint.
 

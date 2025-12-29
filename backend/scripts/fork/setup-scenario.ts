@@ -152,10 +152,34 @@ async function main() {
   const priceWeth_e8 = BigInt(await oracle.getAssetPrice(WETH));
   const priceUsdc_e8 = BigInt(await oracle.getAssetPrice(USDC));
   const cfg = await dataProvider.getReserveConfigurationData(WETH);
-  const ltBps = BigInt(cfg.liquidationThreshold);
+  let ltBps = BigInt(cfg.liquidationThreshold);
+  
+  // Validate liquidation threshold - should be between 50-90% for WETH
+  if (ltBps < 5000n || ltBps > 9000n) {
+    console.warn(`⚠️  Warning: Unusual liquidation threshold: ${ltBps} bps`);
+    console.warn("   Expected range: 5000-9000 bps (50-90%)");
+    console.warn("   This might indicate a fork initialization issue.");
+    console.warn("   Using fallback value of 8000 bps (80%) for safety.");
+    ltBps = 8000n;
+  }
+  
   console.log(
     `WETH=${formatUsdE8(priceWeth_e8)} USD (1e8), USDC=${formatUsdE8(priceUsdc_e8)} USD (1e8), LTbps=${ltBps}`
   );
+  
+  // Validate prices are reasonable
+  if (priceWeth_e8 < 100000000n || priceWeth_e8 > 1000000000000n) {
+    console.error("✗ WETH price seems unreasonable!");
+    console.error(`   Got: ${formatUsdE8(priceWeth_e8)} USD`);
+    console.error("   Expected range: ~$1,000 - $10,000");
+    console.error("\n   Please check that the fork is properly connected to Base mainnet.");
+    process.exit(1);
+  }
+  
+  if (priceUsdc_e8 < 90000000n || priceUsdc_e8 > 110000000n) {
+    console.warn(`⚠️  Warning: USDC price seems off: ${formatUsdE8(priceUsdc_e8)} USD`);
+    console.warn("   Expected: ~$1.00 (0.90 - 1.10)");
+  }
 
   // 4) Compute & borrow (target HF ≈ TARGET_HF_BPS)
   console.log("\n[5/7] Computing initial USDC borrow for target HF bps:", TARGET_HF_BPS);
@@ -167,8 +191,46 @@ async function main() {
     ltBps,
     targetHFbps
   );
+  
+  // Sanity check the borrow amount
+  const collateralValueUsd = (priceWeth_e8 * BigInt(wethBal)) / BigInt(10 ** 18);
+  const borrowValueUsd = (priceUsdc_e8 * amountUsdc6) / BigInt(10 ** 6);
+  const expectedHF = (collateralValueUsd * ltBps) / (borrowValueUsd * 10000n);
+  
   console.log(`Borrowing ~${amountUsdc6.toString()} USDC (6d)`);
-  await (await pool.borrow(USDC, amountUsdc6, 2, 0, wallet.address)).wait();
+  console.log(`Collateral value: $${formatUsdE8(collateralValueUsd)} USD`);
+  console.log(`Borrow value: $${formatUsdE8(borrowValueUsd)} USD`);
+  console.log(`Expected HF: ~${Number(expectedHF) / 100}%`);
+  
+  if (amountUsdc6 > BigInt(10 ** 12)) {
+    console.error("✗ Borrow amount seems unreasonably large!");
+    console.error(`   Calculated: ${amountUsdc6.toString()} USDC (${ethers.formatUnits(amountUsdc6, 6)} USDC)`);
+    console.error("\n   This usually indicates an issue with:");
+    console.error("   1. Liquidation threshold value from the fork");
+    console.error("   2. Oracle prices not properly initialized");
+    console.error("\n   Try:");
+    console.error("   1. Restart the fork: npm run hardhat:node");
+    console.error("   2. Wait a few seconds for fork to fully initialize");
+    console.error("   3. Run this script again");
+    process.exit(1);
+  }
+  
+  try {
+    await (await pool.borrow(USDC, amountUsdc6, 2, 0, wallet.address)).wait();
+  } catch (error) {
+    console.error("\n✗ Borrow transaction failed!");
+    console.error(`   Error: ${error instanceof Error ? error.message : String(error)}`);
+    console.error("\n   Common causes:");
+    console.error("   1. Borrow amount exceeds available liquidity in Aave pool");
+    console.error("   2. Health factor would be too low (< 1.0)");
+    console.error("   3. USDC reserve is frozen or borrowing is paused");
+    console.error("\n   Suggestions:");
+    console.error("   - Try reducing FORK_TEST_ETH_DEPOSIT (e.g., 0.5 or 0.1)");
+    console.error("   - Try increasing FORK_TEST_TARGET_HF_BPS (e.g., 11000 for HF=1.10)");
+    console.error("   - Ensure the fork is properly connected to Base mainnet");
+    throw error;
+  }
+  
   const usdcBal1 = await usdc.balanceOf(wallet.address);
   console.log("USDC balance after initial borrow:", usdcBal1.toString());
 
