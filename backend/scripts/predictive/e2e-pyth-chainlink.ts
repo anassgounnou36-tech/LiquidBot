@@ -139,6 +139,20 @@ async function ensureForkRunning(): Promise<void> {
   
   log('Base fork not detected, attempting to start...');
   
+  // Verify anvil is installed
+  try {
+    const { execSync } = require('child_process');
+    execSync('anvil --version', { stdio: 'ignore' });
+    log('✓ Anvil found');
+  } catch {
+    error('Anvil not found. Please install Foundry:');
+    error('  curl -L https://foundry.paradigm.xyz | bash');
+    error('  foundryup');
+    error('\nOr start fork manually:');
+    error('  anvil --fork-url <BASE_RPC_URL> --chain-id 8453');
+    process.exit(1);
+  }
+  
   // Check for common fork startup scripts
   const forkScriptPaths = [
     join(process.cwd(), 'scripts', 'start-fork.sh'),
@@ -531,7 +545,7 @@ async function getWethPrice(): Promise<number> {
 /**
  * Cleanup resources
  */
-async function cleanup(): Promise<void> {
+async function cleanup(stopFork = false): Promise<void> {
   log('\nCleaning up...');
   
   // Stop backend
@@ -550,9 +564,22 @@ async function cleanup(): Promise<void> {
     await mockPythServer.stop();
   }
   
-  // Note: We leave the fork running for potential manual inspection
-  // User can stop it manually with `killall anvil` or by closing the terminal
-  log('Note: Base fork left running for inspection (stop with: killall anvil)');
+  // Optionally stop fork
+  if (stopFork && forkProcess && !forkProcess.killed) {
+    log('Stopping Base fork...');
+    forkProcess.kill('SIGTERM');
+    await sleep(2000);
+    if (!forkProcess.killed) {
+      forkProcess.kill('SIGKILL');
+    }
+  } else if (forkProcess && forkProcess.pid) {
+    log(`Note: Base fork left running (PID: ${forkProcess.pid})`);
+    log('      Stop manually with: kill ${forkProcess.pid} or killall anvil');
+  } else {
+    log('Note: Base fork may be running (started externally or by script)');
+    log('      Check with: lsof -i :8545');
+    log('      Stop with: killall anvil (if you started it)');
+  }
   
   log('✓ Cleanup complete');
 }
