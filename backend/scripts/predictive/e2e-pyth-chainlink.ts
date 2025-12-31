@@ -187,7 +187,8 @@ async function ensureForkRunning(): Promise<void> {
     '--silent'
   ], {
     detached: false,
-    stdio: ['ignore', 'pipe', 'pipe']
+    stdio: ['ignore', 'pipe', 'pipe'],
+    shell: true // Required for Windows compatibility
   });
   
   if (forkProcess.stdout) {
@@ -239,7 +240,7 @@ async function seedTestPosition(): Promise<string> {
     FORK_TEST_SECOND_BORROW_BPS: SECOND_BORROW_BPS,
   };
   
-  // Run setup-scenario script
+  // Run setup-scenario script via npm (cross-platform compatible)
   return new Promise((resolve, reject) => {
     const setupScript = join(process.cwd(), 'scripts', 'fork', 'setup-scenario.ts');
     
@@ -248,9 +249,12 @@ async function seedTestPosition(): Promise<string> {
       return;
     }
     
-    const setupProcess = spawn('tsx', [setupScript], {
+    // Use npm run fork:setup for cross-platform compatibility (works on Windows)
+    const setupProcess = spawn('npm', ['run', 'fork:setup'], {
+      cwd: process.cwd(),
       env: setupEnv,
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: true // Required for Windows npm compatibility
     });
     
     let output = '';
@@ -366,7 +370,8 @@ async function startBackend(): Promise<void> {
     backendProcess = spawn('npm', ['start'], {
       cwd: process.cwd(),
       env: testEnv,
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: true // Required for Windows npm compatibility
     });
     
     let startupComplete = false;
