@@ -366,8 +366,8 @@ async function startBackend(): Promise<void> {
   };
   
   return new Promise((resolve, reject) => {
-    // Start backend
-    backendProcess = spawn('npm', ['start'], {
+    // Start backend using dev mode (tsx, no build required)
+    backendProcess = spawn('npm', ['run', 'dev'], {
       cwd: process.cwd(),
       env: testEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
