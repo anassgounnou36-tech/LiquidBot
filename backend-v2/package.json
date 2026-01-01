@@ -1,0 +1,49 @@
+{
+  "name": "liquidbot-backend-v2",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Backend V2 service for Aave V3 Base liquidation detection (foundation: universe seeding + oracles)",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18.18.0",
+    "npm": ">=9.0.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node -r dotenv/config dist/src/index.js",
+    "clean": "rimraf dist",
+    "prebuild": "npm run clean",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --ext .ts",
+    "format": "prettier --write .",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.0",
+    "graphql": "^16.9.0",
+    "graphql-request": "^7.1.0",
+    "node-telegram-bot-api": "^0.66.0",
+    "ws": "^8.18.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.5",
+    "@types/node-telegram-bot-api": "^0.64.11",
+    "@types/ws": "^8.18.1",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "@vitest/coverage-v8": "^1.6.1",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.3.3",
+    "rimraf": "^6.0.1",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.20.6",
+    "typescript": "5.5.4",
+    "vitest": "^1.6.0"
+  }
+}
