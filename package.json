@@ -6,6 +6,7 @@
   "license": "MIT",
   "workspaces": [
     "backend",
+    "backend-v2",
     "contracts"
   ],
   "scripts": {
