@@ -3,7 +3,7 @@
 import { seedBorrowerUniverse } from './subgraph/universe.js';
 import { ActiveRiskSet } from './risk/ActiveRiskSet.js';
 import { HealthFactorChecker } from './risk/HealthFactorChecker.js';
-import { PriceService } from './prices/PriceService.js';
+import { ChainlinkListener } from './prices/ChainlinkListener.js';
 import { TelegramNotifier } from './notify/TelegramNotifier.js';
 import { config } from './config/index.js';
 import { DirtyQueue } from './realtime/dirtyQueue.js';
@@ -13,8 +13,9 @@ import { ExecutorClient } from './execution/executorClient.js';
 import { OneInchSwapBuilder } from './execution/oneInch.js';
 import { AttemptHistory } from './execution/attemptHistory.js';
 import { LiquidationAudit } from './audit/liquidationAudit.js';
-import { initChainlinkFeeds } from './prices/priceMath.js';
+import { initChainlinkFeeds, initAddressToSymbolMapping, updateCachedPrice, cacheTokenDecimals } from './prices/priceMath.js';
 import { LiquidationPlanner } from './execution/liquidationPlanner.js';
+import { ProtocolDataProvider } from './aave/protocolDataProvider.js';
 
 // 1inch swap slippage tolerance
 // Should be adjusted based on market conditions and token pair liquidity
@@ -71,31 +72,63 @@ async function main() {
     
     console.log(`[v2] Active risk set built: ${atRiskCount} at-risk users\n`);
 
-    // 3. Setup price service (Chainlink OCR2 + Pyth) with priceMath
-    console.log('[v2] Phase 3: Setting up price oracles');
+    // 3. Setup protocol data caching and address→symbol mapping
+    console.log('[v2] Phase 3: Building protocol data cache');
+    const dataProvider = new ProtocolDataProvider(config.AAVE_PROTOCOL_DATA_PROVIDER);
     
-    // Pyth is disabled in this version (Option B)
+    // Get all reserves and build address→symbol mapping
+    const allReserves = await dataProvider.getAllReservesTokens();
+    initAddressToSymbolMapping(allReserves);
+    
+    // Cache token decimals for all reserves
+    for (const reserve of allReserves) {
+      try {
+        const decimals = await dataProvider.getReserveConfigurationData(reserve.tokenAddress);
+        cacheTokenDecimals(reserve.tokenAddress, decimals.decimals);
+      } catch (err) {
+        console.warn(`[v2] Failed to cache decimals for ${reserve.symbol}:`, err instanceof Error ? err.message : err);
+      }
+    }
+    
+    console.log(`[v2] Protocol data cached: ${allReserves.length} reserves\n`);
+    
+    // 4. Setup price oracles (Chainlink only, Pyth disabled)
+    console.log('[v2] Phase 4: Setting up price oracles');
+    
+    // Pyth is disabled in this version
     console.log('[v2] ⚠️  Pyth price feeds are DISABLED in this version');
     console.log('[v2] Using Chainlink feeds only for price data');
     
-    const priceService = new PriceService();
+    const chainlinkListener = new ChainlinkListener();
     
     // Initialize priceMath with Chainlink feeds
     if (config.CHAINLINK_FEEDS_JSON) {
       initChainlinkFeeds(config.CHAINLINK_FEEDS_JSON);
       for (const [symbol, feedAddress] of Object.entries(config.CHAINLINK_FEEDS_JSON)) {
         if (typeof feedAddress === 'string') {
-          priceService.addChainlinkFeed(symbol, feedAddress);
+          chainlinkListener.addFeed(symbol, feedAddress);
         }
       }
     }
     
-    // Do NOT initialize Pyth feeds - disabled
+    // Wire ChainlinkListener to priceMath.updateCachedPrice()
+    chainlinkListener.onPriceUpdate((update) => {
+      // Chainlink uses 8 decimals by default, normalize to 1e18
+      const decimals = 8;
+      const exponent = 18 - decimals;
+      const price1e18 = update.answer * (10n ** BigInt(exponent));
+      
+      updateCachedPrice(update.symbol, price1e18);
+      console.log(`[v2] Price updated: ${update.symbol} = ${price1e18.toString()} (1e18)`);
+    });
     
-    console.log('[v2] Price service configured (Chainlink only)\n');
+    // Start Chainlink listener
+    await chainlinkListener.start();
+    
+    console.log('[v2] Price oracles configured (Chainlink only)\n');
 
-    // 4. Setup realtime triggers and dirty queue
-    console.log('[v2] Phase 4: Setting up realtime triggers');
+    // 5. Setup realtime triggers and dirty queue
+    console.log('[v2] Phase 5: Setting up realtime triggers');
     const dirtyQueue = new DirtyQueue();
     
     // Get active risk set as Set for listeners
@@ -109,8 +142,8 @@ async function main() {
     
     console.log('[v2] Aave Pool listeners started\n');
 
-    // 5. Setup execution components
-    console.log('[v2] Phase 5: Setting up execution pipeline');
+    // 6. Setup execution components
+    console.log('[v2] Phase 6: Setting up execution pipeline');
     
     const executorClient = new ExecutorClient(
       config.EXECUTOR_ADDRESS,
@@ -124,8 +157,8 @@ async function main() {
     console.log(`[v2] Wallet address: ${executorClient.getWalletAddress()}`);
     console.log(`[v2] Liquidation planner initialized\n`);
 
-    // 6. Setup liquidation audit
-    console.log('[v2] Phase 6: Setting up liquidation audit');
+    // 7. Setup liquidation audit
+    console.log('[v2] Phase 7: Setting up liquidation audit');
     const liquidationAudit = new LiquidationAudit(
       activeRiskSetSet,
       riskSet,
@@ -135,8 +168,8 @@ async function main() {
     liquidationAudit.start();
     console.log('[v2] Liquidation audit listener started\n');
 
-    // 7. Start verifier loop with execution callback
-    console.log('[v2] Phase 7: Starting verifier loop');
+    // 8. Start verifier loop with execution callback
+    console.log('[v2] Phase 8: Starting verifier loop');
     
     const executionEnabled = config.EXECUTION_ENABLED;
     console.log(`[v2] Execution mode: ${executionEnabled ? 'ENABLED ⚠️' : 'DRY RUN (safe)'}`);
@@ -224,7 +257,7 @@ async function main() {
             
             console.log(`[execute] 1inch swap quote obtained: minOut=${swapQuote.minOut}`);
             
-            // Execute liquidation with correct amounts
+            // Execute liquidation with correct amounts and safety checks
             const result = await executorClient.attemptLiquidation({
               user,
               collateralAsset: plan.collateralAsset,
@@ -232,7 +265,8 @@ async function main() {
               debtToCover: plan.debtToCover,
               oneInchCalldata: swapQuote.data,
               minOut: BigInt(swapQuote.minOut),
-              payout: executorClient.getWalletAddress()
+              payout: executorClient.getWalletAddress(),
+              expectedCollateralOut: plan.expectedCollateralOut
             });
             
             if (result.success) {
@@ -279,7 +313,7 @@ async function main() {
     verifierLoop.start();
     console.log('[v2] Verifier loop started\n');
 
-    // 8. Send startup notification
+    // 9. Send startup notification
     await notifier.notifyStartup();
 
     console.log('[v2] ============================================');

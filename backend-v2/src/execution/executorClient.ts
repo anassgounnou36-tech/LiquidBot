@@ -14,6 +14,15 @@ export interface LiquidationParams {
   oneInchCalldata: string;
   minOut: bigint;
   payout: string;
+  expectedCollateralOut?: bigint; // Optional for safety checks
+}
+
+/**
+ * Safety check result
+ */
+interface SafetyCheckResult {
+  safe: boolean;
+  reason?: string;
 }
 
 /**
@@ -52,16 +61,75 @@ export class ExecutorClient {
   }
 
   /**
+   * Perform safety checks before sending transaction
+   */
+  private performSafetyChecks(params: LiquidationParams): SafetyCheckResult {
+    const MAX_SLIPPAGE_BPS = 500; // 5% max slippage
+    
+    // Check 1: expectedCollateralOut must be > 0
+    if (params.expectedCollateralOut !== undefined && params.expectedCollateralOut <= 0n) {
+      return {
+        safe: false,
+        reason: 'expectedCollateralOut must be > 0'
+      };
+    }
+    
+    // Check 2: minOut must be > debtToCover (otherwise we lose money)
+    if (params.minOut <= params.debtToCover) {
+      return {
+        safe: false,
+        reason: `minOut (${params.minOut.toString()}) must be > debtToCover (${params.debtToCover.toString()})`
+      };
+    }
+    
+    // Check 3: slippage check - minOut should be close to expectedCollateralOut
+    if (params.expectedCollateralOut !== undefined) {
+      const slippageAmount = params.expectedCollateralOut - params.minOut;
+      const slippageBps = (slippageAmount * 10000n) / params.expectedCollateralOut;
+      
+      if (slippageBps > BigInt(MAX_SLIPPAGE_BPS)) {
+        return {
+          safe: false,
+          reason: `Slippage too high: ${slippageBps.toString()} BPS (max ${MAX_SLIPPAGE_BPS})`
+        };
+      }
+    }
+    
+    // Check 4: debtToCover must be > 0
+    if (params.debtToCover <= 0n) {
+      return {
+        safe: false,
+        reason: 'debtToCover must be > 0'
+      };
+    }
+    
+    return { safe: true };
+  }
+
+  /**
    * Attempt liquidation with exact ABI call shape
+   * Includes safety checks before sending transaction
    */
   async attemptLiquidation(params: LiquidationParams): Promise<ExecutionResult> {
     try {
+      // Perform safety checks first
+      const safetyCheck = this.performSafetyChecks(params);
+      if (!safetyCheck.safe) {
+        console.error('[executor] Safety check failed:', safetyCheck.reason);
+        return { 
+          success: false, 
+          error: `Safety check failed: ${safetyCheck.reason}` 
+        };
+      }
+      
+      console.log('[executor] Safety checks passed');
       console.log('[executor] Sending liquidation tx:', {
         user: params.user,
         collateralAsset: params.collateralAsset,
         debtAsset: params.debtAsset,
         debtToCover: params.debtToCover.toString(),
-        minOut: params.minOut.toString()
+        minOut: params.minOut.toString(),
+        expectedCollateralOut: params.expectedCollateralOut?.toString() || 'N/A'
       });
 
       // Get current base fee and priority fee

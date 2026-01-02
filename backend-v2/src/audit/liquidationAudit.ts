@@ -14,7 +14,8 @@ export type AuditReason =
   | 'not_in_active_set'
   | 'debt_below_min'
   | 'hf_never_crossed_execute'
-  | 'attempt_failed_or_late';
+  | 'attempt_failed_or_late'
+  | 'priced_out';
 
 /**
  * Liquidation event data
@@ -133,19 +134,26 @@ export class LiquidationAudit {
     const lastHF = userData?.healthFactor || null;
     const lastDebtUsd1e18 = userData?.lastDebtUsd1e18 || null;
     
-    // Convert debtUsd1e18 to display number
+    // Convert debtUsd1e18 to display number (only for display, comparisons use BigInt)
     const lastDebtUsd = lastDebtUsd1e18 ? Number(lastDebtUsd1e18) / 1e18 : null;
     
-    // Check if debt was below minimum
+    // Check if debt was below minimum (use BigInt for comparison)
     const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
     if (lastDebtUsd1e18 !== null && lastDebtUsd1e18 < minDebtUsd1e18) {
       await this.sendAuditNotification(event, 'debt_below_min', lastDebtUsd, lastHF, null);
       return;
     }
 
-    // Check if we attempted but failed
+    // Check if we attempted
     const lastAttempt = this.attemptHistory.getLastAttempt(user);
     if (lastAttempt) {
+      // Check if attempt failed due to safety checks (priced_out)
+      if (lastAttempt.status === 'error' && lastAttempt.error?.includes('Safety check failed')) {
+        await this.sendAuditNotification(event, 'priced_out', lastDebtUsd, lastHF, 'safety_check');
+        return;
+      }
+      
+      // Check if attempt failed or was late
       if (lastAttempt.status === 'sent' || lastAttempt.status === 'reverted' || lastAttempt.status === 'error') {
         await this.sendAuditNotification(event, 'attempt_failed_or_late', lastDebtUsd, lastHF, lastAttempt.status);
         return;
@@ -177,6 +185,7 @@ export class LiquidationAudit {
 
   /**
    * Format audit message for Telegram
+   * Includes all required fields: user, debt/collateral assets, lastHF, lastDebtUsd, reason, liquidator txHash
    */
   private formatAuditMessage(
     event: LiquidationEvent,
@@ -186,8 +195,8 @@ export class LiquidationAudit {
     attemptStatus: string | null
   ): string {
     const userShort = `${event.user.substring(0, 6)}...${event.user.substring(38)}`;
-    const collateralShort = `${event.collateralAsset.substring(0, 6)}...${event.collateralAsset.substring(38)}`;
-    const debtShort = `${event.debtAsset.substring(0, 6)}...${event.debtAsset.substring(38)}`;
+    const collateralShort = `${event.collateralAsset.substring(0, 10)}...`;
+    const debtShort = `${event.debtAsset.substring(0, 10)}...`;
     const liquidatorShort = `${event.liquidator.substring(0, 6)}...${event.liquidator.substring(38)}`;
     const txLink = `https://basescan.org/tx/${event.txHash}`;
 
@@ -205,22 +214,26 @@ export class LiquidationAudit {
       case 'attempt_failed_or_late':
         reasonText = `🔄 We attempted but ${attemptStatus || 'failed'}`;
         break;
+      case 'priced_out':
+        reasonText = `💸 Priced out: minOut or safety checks failed`;
+        break;
     }
 
-    const debtUsdStr = debtUsd !== null ? `$${debtUsd.toFixed(2)}` : 'N/A';
+    // Display debtUsd as number only (not 1e18 BigInt)
+    const debtUsdStr = debtUsd !== null ? debtUsd.toFixed(2) : 'N/A';
     const lastHFStr = lastHF !== null ? lastHF.toFixed(4) : 'N/A';
 
     return `🔍 **[Liquidation Audit]**
 
 👤 User: \`${userShort}\`
-💎 Collateral: \`${collateralShort}\`
-💰 Debt: \`${debtShort}\`
-🔢 Debt USD: ${debtUsdStr}
-👤 Liquidator: \`${liquidatorShort}\`
-🔗 [Tx](${txLink})
+💎 Collateral Asset: \`${collateralShort}\`
+💰 Debt Asset: \`${debtShort}\`
+💵 Last Debt USD: $${debtUsdStr}
+❤️ Last HF: ${lastHFStr}
+🏦 Liquidator: \`${liquidatorShort}\`
+🔗 [Transaction](${txLink})
 📦 Block: ${event.blockNumber}
 
-📊 Reason: ${reasonText}
-${lastHF !== null ? `❤️ Last HF: ${lastHFStr}` : ''}`;
+📊 Reason: ${reasonText}`;
   }
 }
