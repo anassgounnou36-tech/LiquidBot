@@ -89,10 +89,12 @@ export function startVerifierLoop(opts: VerifierLoopOptions): void {
           }
 
           // Calculate debt to cover (fixed 50% for PR2)
+          // Future: Make configurable via LIQUIDATION_RATIO_PERCENT env
           const debtToCover = totalDebtBase / 2n;
 
           // Get 1inch swap quote
           // We swap collateral -> debt asset to repay
+          // Future: Make slippage configurable via SLIPPAGE_BPS env
           const quote = await getOneInchSwap({
             fromToken: pair.collateralAsset,
             toToken: pair.debtAsset,
@@ -141,6 +143,7 @@ export function startVerifierLoop(opts: VerifierLoopOptions): void {
   };
 
   // Run every 250ms
+  // Future: Make interval configurable via VERIFIER_LOOP_INTERVAL_MS env
   setInterval(tick, 250);
   
   console.log('[verifier-loop] Started (tick interval: 250ms)');

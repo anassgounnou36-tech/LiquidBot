@@ -73,6 +73,8 @@ export async function getOneInchSwap(req: OneInchSwapRequest): Promise<OneInchSw
     throw new Error(`1inch API error ${resp.status}: ${errorText}`);
   }
 
+  // Note: Using 'any' for 1inch response - API schema varies between v5/v6
+  // Future: Define proper interfaces for v5/v6 response types
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const data: any = await resp.json();
 
