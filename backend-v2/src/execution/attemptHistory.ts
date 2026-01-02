@@ -1,5 +1,7 @@
 // execution/attemptHistory.ts: Track per-user liquidation attempts
 
+// Attempt status types
+// Note: 'reverted' and 'included' are reserved for future transaction receipt parsing
 export type AttemptStatus = 'sent' | 'reverted' | 'included' | 'error' | 'skip_no_pair';
 
 export interface AttemptRecord {

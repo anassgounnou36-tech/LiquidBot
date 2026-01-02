@@ -12,11 +12,12 @@ const AAVE_POOL_ABI = [
 
 /**
  * Simplified audit reason codes
+ * Note: For PR2, keeping minimal classification. Future enhancements:
+ * - 'min_debt': User debt < MIN_DEBT_USD (requires USD calculation)
+ * - 'hf_above_threshold': User HF > threshold at last check (requires tracking)
  */
 export type AuditReason = 
   | 'no_attempt'           // User not in active set at audit time
-  | 'min_debt'             // User debt < MIN_DEBT_USD
-  | 'hf_above_threshold'   // User HF > HF_THRESHOLD_EXECUTE at last check
   | 'raced_or_reverted';   // We attempted but were raced or tx reverted
 
 /**
