@@ -27,6 +27,9 @@ const envSchema = z.object({
   // RPC endpoints
   RPC_URL: z.string().url(),
   WS_RPC_URL: z.string().url(),
+  
+  // Multi-RPC broadcasting (optional, comma-separated list)
+  BROADCAST_RPC_URLS: commaSeparatedString.optional(),
 
   // Subgraph
   SUBGRAPH_URL: z.string().url(),

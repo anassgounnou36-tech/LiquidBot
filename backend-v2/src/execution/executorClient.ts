@@ -2,6 +2,7 @@
 
 import { ethers } from 'ethers';
 import { getHttpProvider } from '../providers/rpc.js';
+import { TxBroadcaster } from './txBroadcaster.js';
 
 /**
  * Liquidation parameters matching the exact struct from ExecutionService.ts
@@ -42,11 +43,23 @@ export class ExecutorClient {
   private wallet: ethers.Wallet;
   private executorAddress: string;
   private contract: ethers.Contract;
+  private broadcaster: TxBroadcaster | null = null;
 
-  constructor(executorAddress: string, privateKey: string) {
+  constructor(executorAddress: string, privateKey: string, broadcastRpcUrls?: string[]) {
     this.provider = getHttpProvider();
     this.wallet = new ethers.Wallet(privateKey, this.provider);
     this.executorAddress = executorAddress;
+    
+    // Initialize broadcaster if multiple RPCs provided
+    if (broadcastRpcUrls && broadcastRpcUrls.length > 1) {
+      this.broadcaster = new TxBroadcaster({
+        rpcUrls: broadcastRpcUrls,
+        replacementDelayMs: 3000,
+        maxReplacements: 3,
+        priorityFeeBumpPercent: 20
+      });
+      console.log(`[executor] Multi-RPC broadcast enabled with ${broadcastRpcUrls.length} RPCs`);
+    }
 
     // Exact ABI from old bot's ExecutionService.ts
     const executorAbi = [
@@ -62,11 +75,21 @@ export class ExecutorClient {
 
   /**
    * Perform safety checks before sending transaction
+   * Uses repayment correctness: minOut must cover debtToCover + fees + buffer
    */
   private performSafetyChecks(params: LiquidationParams): SafetyCheckResult {
-    const MAX_SLIPPAGE_BPS = 500; // 5% max slippage
+    const FLASHLOAN_FEE_BPS = 9; // 0.09% Aave flashloan fee
+    const SAFETY_BUFFER_BPS = 50; // 0.5% safety margin
     
-    // Check 1: expectedCollateralOut must be > 0
+    // Check 1: debtToCover must be > 0
+    if (params.debtToCover <= 0n) {
+      return {
+        safe: false,
+        reason: 'debtToCover must be > 0'
+      };
+    }
+    
+    // Check 2: expectedCollateralOut must be > 0 if provided
     if (params.expectedCollateralOut !== undefined && params.expectedCollateralOut <= 0n) {
       return {
         safe: false,
@@ -74,32 +97,18 @@ export class ExecutorClient {
       };
     }
     
-    // Check 2: minOut must be > debtToCover (otherwise we lose money)
-    if (params.minOut <= params.debtToCover) {
+    // Check 3: Repayment correctness - minOut must cover debt + fees + buffer
+    // minOut is in debt token units, representing what we get from swapping collateral
+    // It must be enough to repay debtToCover + flashloan fee + safety margin
+    const flashloanFee = (params.debtToCover * BigInt(FLASHLOAN_FEE_BPS)) / 10000n;
+    const safetyBuffer = (params.debtToCover * BigInt(SAFETY_BUFFER_BPS)) / 10000n;
+    const minRequiredOut = params.debtToCover + flashloanFee + safetyBuffer;
+    
+    if (params.minOut < minRequiredOut) {
       return {
         safe: false,
-        reason: `minOut (${params.minOut.toString()}) must be > debtToCover (${params.debtToCover.toString()})`
-      };
-    }
-    
-    // Check 3: slippage check - minOut should be close to expectedCollateralOut
-    if (params.expectedCollateralOut !== undefined) {
-      const slippageAmount = params.expectedCollateralOut - params.minOut;
-      const slippageBps = (slippageAmount * 10000n) / params.expectedCollateralOut;
-      
-      if (slippageBps > BigInt(MAX_SLIPPAGE_BPS)) {
-        return {
-          safe: false,
-          reason: `Slippage too high: ${slippageBps.toString()} BPS (max ${MAX_SLIPPAGE_BPS})`
-        };
-      }
-    }
-    
-    // Check 4: debtToCover must be > 0
-    if (params.debtToCover <= 0n) {
-      return {
-        safe: false,
-        reason: 'debtToCover must be > 0'
+        reason: `Repayment check failed: minOut (${params.minOut.toString()}) < required (${minRequiredOut.toString()}). ` +
+                `Required = debtToCover (${params.debtToCover.toString()}) + fee (${flashloanFee.toString()}) + buffer (${safetyBuffer.toString()})`
       };
     }
     
@@ -109,6 +118,7 @@ export class ExecutorClient {
   /**
    * Attempt liquidation with exact ABI call shape
    * Includes safety checks before sending transaction
+   * Uses multi-RPC broadcast if configured
    */
   async attemptLiquidation(params: LiquidationParams): Promise<ExecutionResult> {
     try {
@@ -137,8 +147,8 @@ export class ExecutorClient {
       const maxPriorityFeePerGas = feeData.maxPriorityFeePerGas || ethers.parseUnits('1', 'gwei');
       const maxFeePerGas = feeData.maxFeePerGas || ethers.parseUnits('50', 'gwei');
 
-      // Call initiateLiquidation with exact struct format
-      const tx = await this.contract.initiateLiquidation(
+      // Build transaction request
+      const txRequest: ethers.TransactionRequest = await this.contract.initiateLiquidation.populateTransaction(
         {
           user: params.user,
           collateralAsset: params.collateralAsset,
@@ -147,24 +157,41 @@ export class ExecutorClient {
           oneInchCalldata: params.oneInchCalldata,
           minOut: params.minOut,
           payout: params.payout
-        },
-        {
-          maxPriorityFeePerGas,
-          maxFeePerGas
         }
       );
 
-      console.log('[executor] Transaction sent:', tx.hash);
+      // Add gas settings
+      txRequest.maxPriorityFeePerGas = maxPriorityFeePerGas;
+      txRequest.maxFeePerGas = maxFeePerGas;
 
-      // Wait for confirmation
-      const receipt = await tx.wait();
-
-      if (receipt.status === 1) {
-        console.log('[executor] Transaction confirmed:', receipt.hash);
-        return { success: true, txHash: receipt.hash };
+      // Use broadcaster if available, otherwise send normally
+      if (this.broadcaster) {
+        console.log('[executor] Using multi-RPC broadcast with replacement strategy');
+        const result = await this.broadcaster.broadcastWithReplacement(this.wallet, txRequest);
+        
+        if (result.success && result.txHash) {
+          console.log('[executor] Transaction confirmed:', result.txHash);
+          return { success: true, txHash: result.txHash };
+        } else {
+          console.error('[executor] Broadcast failed:', result.error);
+          return { success: false, error: result.error };
+        }
       } else {
-        console.error('[executor] Transaction reverted:', receipt.hash);
-        return { success: false, txHash: receipt.hash, error: 'Transaction reverted' };
+        // Single RPC path (legacy)
+        console.log('[executor] Using single RPC (no multi-broadcast)');
+        const tx = await this.wallet.sendTransaction(txRequest);
+        console.log('[executor] Transaction sent:', tx.hash);
+
+        // Wait for confirmation
+        const receipt = await tx.wait();
+
+        if (receipt && receipt.status === 1) {
+          console.log('[executor] Transaction confirmed:', receipt.hash);
+          return { success: true, txHash: receipt.hash };
+        } else {
+          console.error('[executor] Transaction reverted:', receipt?.hash);
+          return { success: false, txHash: receipt?.hash, error: 'Transaction reverted' };
+        }
       }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);

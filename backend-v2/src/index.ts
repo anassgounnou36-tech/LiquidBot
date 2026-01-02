@@ -16,6 +16,7 @@ import { LiquidationAudit } from './audit/liquidationAudit.js';
 import { initChainlinkFeeds, initChainlinkFeedsByAddress, initAddressToSymbolMapping, updateCachedPrice, cacheTokenDecimals } from './prices/priceMath.js';
 import { LiquidationPlanner } from './execution/liquidationPlanner.js';
 import { ProtocolDataProvider } from './aave/protocolDataProvider.js';
+import { metrics } from './metrics/metrics.js';
 
 // 1inch swap slippage tolerance
 // Should be adjusted based on market conditions and token pair liquidity
@@ -147,9 +148,15 @@ async function main() {
     // 6. Setup execution components
     console.log('[v2] Phase 6: Setting up execution pipeline');
     
+    // Prepare broadcast RPC URLs
+    const broadcastRpcUrls = config.BROADCAST_RPC_URLS && config.BROADCAST_RPC_URLS.length > 0
+      ? config.BROADCAST_RPC_URLS
+      : [config.RPC_URL];
+    
     const executorClient = new ExecutorClient(
       config.EXECUTOR_ADDRESS,
-      config.EXECUTION_PRIVATE_KEY
+      config.EXECUTION_PRIVATE_KEY,
+      broadcastRpcUrls
     );
     const oneInchBuilder = new OneInchSwapBuilder(8453); // Base chain ID
     const liquidationPlanner = new LiquidationPlanner(config.AAVE_PROTOCOL_DATA_PROVIDER);
@@ -157,7 +164,12 @@ async function main() {
     
     console.log(`[v2] Executor client initialized (address=${executorClient.getAddress()})`);
     console.log(`[v2] Wallet address: ${executorClient.getWalletAddress()}`);
+    console.log(`[v2] Broadcast RPCs: ${broadcastRpcUrls.length}`);
     console.log(`[v2] Liquidation planner initialized\n`);
+    
+    // Start metrics logging (every 60 seconds)
+    metrics.startPeriodicLogging(60000);
+    console.log('[v2] Performance metrics enabled\n');
 
     // 7. Setup liquidation audit
     console.log('[v2] Phase 7: Setting up liquidation audit');
