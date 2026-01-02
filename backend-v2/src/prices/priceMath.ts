@@ -19,6 +19,12 @@ const priceCache = new Map<string, { price: bigint; timestamp: number }>();
 const chainlinkFeedAddresses = new Map<string, string>();
 
 /**
+ * Address to feed address mapping (lowercase token address -> feed address)
+ * For address-first pricing without symbol() calls
+ */
+const addressToFeedMap = new Map<string, string>();
+
+/**
  * Pyth feed ID cache
  */
 const pythFeedIds = new Map<string, string>();
@@ -51,6 +57,18 @@ export function initChainlinkFeeds(feeds: Record<string, string>): void {
   }
   
   console.log(`[priceMath] Initialized ${chainlinkFeedAddresses.size} Chainlink feeds`);
+}
+
+/**
+ * Initialize address-to-feed mapping from config (address-first pricing)
+ * @param feedsByAddress Mapping of token address to feed address
+ */
+export function initChainlinkFeedsByAddress(feedsByAddress: Record<string, string>): void {
+  for (const [tokenAddress, feedAddress] of Object.entries(feedsByAddress)) {
+    addressToFeedMap.set(tokenAddress.toLowerCase(), feedAddress.toLowerCase());
+  }
+  
+  console.log(`[priceMath] Initialized ${addressToFeedMap.size} address-to-feed mappings`);
 }
 
 /**
@@ -284,11 +302,41 @@ export async function getUsdPrice(symbol: string): Promise<bigint> {
  * Get USD price for a token address (normalized to 1e18 BigInt)
  * Resolves address→symbol via mapping, then fetches price
  * Supports Chainlink direct feeds and ratio feeds
+ * 
+ * Address-first approach: if address-to-feed mapping exists, use it directly
+ * Otherwise, fall back to address→symbol→feed mapping
  */
 export async function getUsdPriceForAddress(address: string): Promise<bigint> {
   const normalizedAddress = address.toLowerCase();
   
-  // Resolve address to symbol
+  // Try address-to-feed mapping first (address-first pricing)
+  const feedAddress = addressToFeedMap.get(normalizedAddress);
+  if (feedAddress) {
+    // Fetch price directly from feed
+    const provider = getHttpProvider();
+    const feedContract = new ethers.Contract(
+      feedAddress,
+      ['function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80)'],
+      provider
+    );
+
+    const [, answer] = await feedContract.latestRoundData();
+    const decimals = await getChainlinkDecimals(feedAddress);
+
+    // Normalize to 1e18 using pure BigInt exponentiation
+    const price = BigInt(answer.toString());
+    if (decimals === 18) {
+      return price;
+    } else if (decimals < 18) {
+      const exponent = 18 - decimals;
+      return price * (10n ** BigInt(exponent));
+    } else {
+      const exponent = decimals - 18;
+      return price / (10n ** BigInt(exponent));
+    }
+  }
+  
+  // Fall back to address→symbol mapping (legacy path)
   const symbol = addressToSymbolMap.get(normalizedAddress);
   
   if (!symbol) {

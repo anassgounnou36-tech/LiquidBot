@@ -12,7 +12,7 @@ const CHAINLINK_AGG_ABI = [
 export interface ChainlinkPriceUpdate {
   symbol: string;
   feedAddress: string;
-  answer: bigint;
+  answer: bigint; // Normalized to 1e18
   roundId: number;
   timestamp: number;
 }
@@ -30,15 +30,34 @@ export class ChainlinkListener {
   private callbacks: PriceUpdateCallback[] = [];
   private dedupeCache: Set<string> = new Set(); // roundId:feedAddress
   private contracts: Map<string, Contract> = new Map(); // feedAddress -> Contract
+  private decimalsCache: Map<string, number> = new Map(); // feedAddress -> decimals
 
   /**
    * Add a price feed to monitor
    * @param symbol Asset symbol (e.g., "WETH", "USDC")
    * @param feedAddress Chainlink feed contract address
    */
-  addFeed(symbol: string, feedAddress: string): void {
-    this.feeds.set(symbol, feedAddress.toLowerCase());
-    console.log(`[chainlink] Added feed: ${symbol} -> ${feedAddress}`);
+  async addFeed(symbol: string, feedAddress: string): Promise<void> {
+    const normalizedAddress = feedAddress.toLowerCase();
+    this.feeds.set(symbol, normalizedAddress);
+    
+    // Query and cache decimals for this feed
+    try {
+      const provider = getWsProvider();
+      const feedContract = new Contract(
+        feedAddress,
+        ['function decimals() external view returns (uint8)'],
+        provider
+      );
+      
+      const decimals = await feedContract.decimals();
+      this.decimalsCache.set(normalizedAddress, Number(decimals));
+      
+      console.log(`[chainlink] Added feed: ${symbol} -> ${feedAddress} (decimals=${decimals})`);
+    } catch (err) {
+      console.error(`[chainlink] Failed to query decimals for ${symbol} (${feedAddress}):`, err);
+      throw err;
+    }
   }
 
   /**
@@ -107,7 +126,7 @@ export class ChainlinkListener {
       if (!decoded) return;
 
       const roundId = Number(decoded.args.aggregatorRoundId);
-      const answer = BigInt(decoded.args.answer);
+      const rawAnswer = BigInt(decoded.args.answer);
 
       // Dedupe by roundId:feedAddress
       const dedupeKey = `${roundId}:${feedAddress}`;
@@ -116,11 +135,30 @@ export class ChainlinkListener {
       }
       this.dedupeCache.add(dedupeKey);
 
-      // Notify callbacks
+      // Get cached decimals for normalization
+      const decimals = this.decimalsCache.get(feedAddress);
+      if (decimals === undefined) {
+        console.error(`[chainlink] No cached decimals for feed ${feedAddress}`);
+        return;
+      }
+
+      // Normalize answer to 1e18 BigInt using cached decimals
+      let normalizedAnswer: bigint;
+      if (decimals === 18) {
+        normalizedAnswer = rawAnswer;
+      } else if (decimals < 18) {
+        const exponent = 18 - decimals;
+        normalizedAnswer = rawAnswer * (10n ** BigInt(exponent));
+      } else {
+        const exponent = decimals - 18;
+        normalizedAnswer = rawAnswer / (10n ** BigInt(exponent));
+      }
+
+      // Notify callbacks with normalized answer
       const update: ChainlinkPriceUpdate = {
         symbol,
         feedAddress,
-        answer,
+        answer: normalizedAnswer,
         roundId,
         timestamp: Date.now()
       };
@@ -134,7 +172,7 @@ export class ChainlinkListener {
       }
 
       console.log(
-        `[chainlink] NewTransmission: ${symbol} roundId=${roundId} answer=${answer.toString()}`
+        `[chainlink] NewTransmission: ${symbol} roundId=${roundId} rawAnswer=${rawAnswer.toString()} (${decimals}d) normalized=${normalizedAnswer.toString()} (1e18)`
       );
     } catch (err) {
       console.error('[chainlink] Error parsing log:', err);

@@ -13,7 +13,7 @@ import { ExecutorClient } from './execution/executorClient.js';
 import { OneInchSwapBuilder } from './execution/oneInch.js';
 import { AttemptHistory } from './execution/attemptHistory.js';
 import { LiquidationAudit } from './audit/liquidationAudit.js';
-import { initChainlinkFeeds, initAddressToSymbolMapping, updateCachedPrice, cacheTokenDecimals } from './prices/priceMath.js';
+import { initChainlinkFeeds, initChainlinkFeedsByAddress, initAddressToSymbolMapping, updateCachedPrice, cacheTokenDecimals } from './prices/priceMath.js';
 import { LiquidationPlanner } from './execution/liquidationPlanner.js';
 import { ProtocolDataProvider } from './aave/protocolDataProvider.js';
 
@@ -106,20 +106,22 @@ async function main() {
       initChainlinkFeeds(config.CHAINLINK_FEEDS_JSON);
       for (const [symbol, feedAddress] of Object.entries(config.CHAINLINK_FEEDS_JSON)) {
         if (typeof feedAddress === 'string') {
-          chainlinkListener.addFeed(symbol, feedAddress);
+          await chainlinkListener.addFeed(symbol, feedAddress);
         }
       }
     }
     
+    // Initialize address-to-feed mapping if provided (address-first pricing)
+    if (config.CHAINLINK_FEEDS_BY_ADDRESS_JSON) {
+      initChainlinkFeedsByAddress(config.CHAINLINK_FEEDS_BY_ADDRESS_JSON);
+      console.log('[v2] Address-first pricing enabled');
+    }
+    
     // Wire ChainlinkListener to priceMath.updateCachedPrice()
+    // Answer is already normalized to 1e18 by ChainlinkListener
     chainlinkListener.onPriceUpdate((update) => {
-      // Chainlink uses 8 decimals by default, normalize to 1e18
-      const decimals = 8;
-      const exponent = 18 - decimals;
-      const price1e18 = update.answer * (10n ** BigInt(exponent));
-      
-      updateCachedPrice(update.symbol, price1e18);
-      console.log(`[v2] Price updated: ${update.symbol} = ${price1e18.toString()} (1e18)`);
+      updateCachedPrice(update.symbol, update.answer);
+      console.log(`[v2] Price updated: ${update.symbol} = ${update.answer.toString()} (1e18)`);
     });
     
     // Start Chainlink listener

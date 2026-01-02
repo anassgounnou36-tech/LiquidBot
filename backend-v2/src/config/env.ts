@@ -61,6 +61,7 @@ const envSchema = z.object({
 
   // Chainlink feeds (optional overrides)
   CHAINLINK_FEEDS_JSON: optionalJsonString(z.record(z.string(), z.string())),
+  CHAINLINK_FEEDS_BY_ADDRESS_JSON: optionalJsonString(z.record(z.string(), z.string())),
 
   // Pyth Network
   PYTH_WS_URL: z.string().url().default('wss://hermes.pyth.network/ws'),
