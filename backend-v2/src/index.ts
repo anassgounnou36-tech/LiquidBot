@@ -310,12 +310,23 @@ async function main() {
               expectedCollateralOut: plan.expectedCollateralOut
             });
             
-            if (result.success) {
+            if (result.status === 'mined') {
               console.log(`[execute] ✅ Liquidation successful! txHash=${result.txHash}`);
               attemptHistory.record({
                 user,
                 timestamp: Date.now(),
                 status: 'included',
+                txHash: result.txHash,
+                debtAsset: plan.debtAsset,
+                collateralAsset: plan.collateralAsset,
+                debtToCover: plan.debtToCover.toString()
+              });
+            } else if (result.status === 'pending') {
+              console.warn(`[execute] ⏳ Liquidation pending (not mined yet): txHash=${result.txHash}`);
+              attemptHistory.record({
+                user,
+                timestamp: Date.now(),
+                status: 'sent',
                 txHash: result.txHash,
                 debtAsset: plan.debtAsset,
                 collateralAsset: plan.collateralAsset,

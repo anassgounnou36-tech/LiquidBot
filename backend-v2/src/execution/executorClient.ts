@@ -27,13 +27,12 @@ interface SafetyCheckResult {
 }
 
 /**
- * Execution result
+ * Execution result with status discrimination
  */
-export interface ExecutionResult {
-  success: boolean;
-  txHash?: string;
-  error?: string;
-}
+export type ExecutionResult =
+  | { status: 'mined'; txHash: string; receipt: ethers.TransactionReceipt }
+  | { status: 'pending'; txHash: string }
+  | { status: 'failed'; error: string; txHash?: string };
 
 /**
  * ExecutorClient handles communication with the LiquidationExecutor contract
@@ -127,7 +126,7 @@ export class ExecutorClient {
       if (!safetyCheck.safe) {
         console.error('[executor] Safety check failed:', safetyCheck.reason);
         return { 
-          success: false, 
+          status: 'failed',
           error: `Safety check failed: ${safetyCheck.reason}` 
         };
       }
@@ -171,20 +170,16 @@ export class ExecutorClient {
         
         if (result.status === 'mined') {
           console.log('[executor] Transaction confirmed:', result.txHash);
-          return { success: true, txHash: result.txHash };
+          return { status: 'mined', txHash: result.txHash, receipt: result.receipt };
         } else if (result.status === 'pending') {
           console.warn('[executor] Transaction still pending after max retries:', result.txHash);
-          return { 
-            success: false, 
-            txHash: result.txHash,
-            error: 'Transaction pending (not mined within timeout)' 
-          };
+          return { status: 'pending', txHash: result.txHash };
         } else {
           console.error('[executor] Broadcast failed:', result.error);
           return { 
-            success: false, 
-            txHash: result.lastTxHash,
-            error: result.error 
+            status: 'failed',
+            error: result.error,
+            txHash: result.lastTxHash
           };
         }
       } else {
@@ -198,16 +193,16 @@ export class ExecutorClient {
 
         if (receipt && receipt.status === 1) {
           console.log('[executor] Transaction confirmed:', receipt.hash);
-          return { success: true, txHash: receipt.hash };
+          return { status: 'mined', txHash: receipt.hash, receipt };
         } else {
           console.error('[executor] Transaction reverted:', receipt?.hash);
-          return { success: false, txHash: receipt?.hash, error: 'Transaction reverted' };
+          return { status: 'failed', error: 'Transaction reverted', txHash: receipt?.hash };
         }
       }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error('[executor] Execution failed:', errorMsg);
-      return { success: false, error: errorMsg };
+      return { status: 'failed', error: errorMsg };
     }
   }
 
