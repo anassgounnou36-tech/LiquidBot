@@ -95,8 +95,8 @@ export class HealthFactorChecker {
           
           // Calculate debtUsd1e18 from totalDebtBase using priceMath
           // totalDebtBase is in 1e8 units (Aave base currency)
-          // Step 1: Convert to 1e18
-          const totalDebtBase1e18 = BigInt(totalDebtBase.toString()) * (10n ** 10n);
+          // Step 1: Convert to 1e18 (totalDebtBase is already BigInt from ABI)
+          const totalDebtBase1e18 = totalDebtBase * (10n ** 10n);
           
           // Step 2: Multiply by ETH USD price (both 1e18)
           const debtUsd1e18 = (totalDebtBase1e18 * ethUsd1e18) / (10n ** 18n);

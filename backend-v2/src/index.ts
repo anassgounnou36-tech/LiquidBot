@@ -18,6 +18,15 @@ import { AttemptHistory } from './execution/attemptHistory.js';
 import { LiquidationAudit } from './audit/liquidationAudit.js';
 import { initChainlinkFeeds } from './prices/priceMath.js';
 
+// Liquidation execution constants
+// Note: Aave V3 liquidation bonus varies by asset (typically 5-10%)
+// This is a conservative estimate; production should query per-asset bonus
+const LIQUIDATION_BONUS_BPS = 500; // 5% = 500 basis points
+
+// 1inch swap slippage tolerance
+// Should be adjusted based on market conditions and token pair liquidity
+const SWAP_SLIPPAGE_BPS = 100; // 1% = 100 basis points
+
 /**
  * Main application entry point
  */
@@ -224,10 +233,10 @@ async function main() {
               debtToCoverNative = debtToCover * (10n ** BigInt(debtDecimals - 8));
             }
             
-            // Get expected collateral with liquidation bonus (assume 5% bonus)
-            const expectedCollateralWithBonus = (debtToCoverNative * 105n) / 100n;
+            // Get expected collateral with liquidation bonus
+            const expectedCollateralWithBonus = (debtToCoverNative * (10000n + BigInt(LIQUIDATION_BONUS_BPS))) / 10000n;
             
-            console.log(`[execute] Expected collateral (with 5% bonus): ${expectedCollateralWithBonus.toString()}`);
+            console.log(`[execute] Expected collateral (with ${LIQUIDATION_BONUS_BPS / 100}% bonus): ${expectedCollateralWithBonus.toString()}`);
             
             // Build 1inch swap calldata
             const swapQuote = await oneInchBuilder.getSwapCalldata({
@@ -235,7 +244,7 @@ async function main() {
               toToken: pair.debtAsset,
               amount: expectedCollateralWithBonus.toString(),
               fromAddress: executorClient.getAddress(),
-              slippageBps: 100 // 1% slippage
+              slippageBps: SWAP_SLIPPAGE_BPS
             });
             
             console.log(`[execute] 1inch swap quote obtained: minOut=${swapQuote.minOut}`);

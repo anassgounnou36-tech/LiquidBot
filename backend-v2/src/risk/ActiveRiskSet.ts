@@ -2,6 +2,9 @@
 
 import { config } from '../config/index.js';
 
+// Hysteresis: HF must be above this margin to be removed from risk set
+const REMOVAL_HF_MARGIN = 1.10;
+
 export interface CandidateUser {
   address: string;
   healthFactor: number;
@@ -82,10 +85,9 @@ export class ActiveRiskSet {
     if (!candidate) return false;
     
     const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
-    const safeMargin = 1.10; // HF must be above 1.10 to be removed
     
     // Remove if debt is too low OR HF is safely above threshold
-    return candidate.lastDebtUsd1e18 < minDebtUsd1e18 || candidate.healthFactor > safeMargin;
+    return candidate.lastDebtUsd1e18 < minDebtUsd1e18 || candidate.healthFactor > REMOVAL_HF_MARGIN;
   }
 
   /**
