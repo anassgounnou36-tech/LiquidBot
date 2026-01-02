@@ -297,21 +297,34 @@ async function fetchPythPrice(symbol: string): Promise<bigint> {
 
 /**
  * Get USD price for a symbol (normalized to 1e18 BigInt)
+ * CACHE-FIRST: Uses in-memory prices from ChainlinkListener (zero RPC calls in normal operation)
+ * Falls back to RPC only if cache miss on startup
  * Supports Chainlink direct feeds and ratio feeds
  * NOTE: Pyth is disabled in this version - use Chainlink feeds only
  */
 export async function getUsdPrice(symbol: string): Promise<bigint> {
   const normalizedSymbol = symbol.toUpperCase();
 
-  // Check cache first (with TTL)
-  const cached = priceCache.get(normalizedSymbol);
-  const now = Date.now();
-  const cacheTtlMs = 30000; // 30 seconds
+  // Resolve symbol to feed address
+  const feedAddress = chainlinkFeedAddresses.get(normalizedSymbol);
   
-  if (cached && (now - cached.timestamp) < cacheTtlMs) {
-    return cached.price;
+  // CACHE-FIRST: Try to get price from ChainlinkListener cache
+  if (feedAddress && chainlinkListenerInstance) {
+    const cachedPrice = chainlinkListenerInstance.getCachedPrice(feedAddress);
+    if (cachedPrice !== null) {
+      return cachedPrice; // Zero RPC calls
+    }
+    console.warn(`[priceMath] Cache miss for ${normalizedSymbol}, falling back to RPC`);
+  }
+  
+  // For ratio feeds, check if they have a specific feed
+  const ratioFeedAddress = chainlinkFeedAddresses.get(`${normalizedSymbol}_ETH`);
+  if (ratioFeedAddress && chainlinkListenerInstance) {
+    // Try cached ratio feed composition
+    return fetchRatioFeedPrice(normalizedSymbol);
   }
 
+  // Fallback: Fetch from RPC (only on startup or cache miss)
   let price: bigint;
 
   // Try Chainlink direct feed
@@ -327,7 +340,8 @@ export async function getUsdPrice(symbol: string): Promise<bigint> {
     throw new Error(`No Chainlink price feed configured for ${normalizedSymbol}. Pyth is disabled in this version.`);
   }
 
-  // Cache the price
+  // Cache the price in local cache (for backward compatibility with TTL checks)
+  const now = Date.now();
   priceCache.set(normalizedSymbol, { price, timestamp: now });
 
   return price;

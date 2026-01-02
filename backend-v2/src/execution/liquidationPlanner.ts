@@ -42,6 +42,7 @@ interface PairScore {
 export class LiquidationPlanner {
   private dataProvider: ProtocolDataProvider;
   private provider: ethers.JsonRpcProvider;
+  private reserveConfigCache: Map<string, any> = new Map(); // address -> reserve config (persistent)
 
   constructor(dataProviderAddress: string) {
     this.dataProvider = new ProtocolDataProvider(dataProviderAddress);
@@ -183,9 +184,17 @@ export class LiquidationPlanner {
     });
     
     // Prefetch all reserve configs concurrently
+    // Use persistent cache to avoid repeated fetches across plans
     const configPromises = Array.from(allAddresses).map(async (address) => {
+      // Check persistent cache first
+      if (this.reserveConfigCache.has(address)) {
+        return { address, config: this.reserveConfigCache.get(address) };
+      }
+      
       try {
         const config = await this.dataProvider.getReserveConfigurationData(address);
+        // Store in persistent cache
+        this.reserveConfigCache.set(address, config);
         return { address, config };
       } catch (err) {
         console.warn(`[liquidationPlanner] Failed to fetch config for ${address}:`, err instanceof Error ? err.message : err);
