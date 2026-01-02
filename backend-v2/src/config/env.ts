@@ -27,6 +27,9 @@ const envSchema = z.object({
   // RPC endpoints
   RPC_URL: z.string().url(),
   WS_RPC_URL: z.string().url(),
+  
+  // Multi-RPC broadcasting (optional, comma-separated list)
+  BROADCAST_RPC_URLS: commaSeparatedString.optional(),
 
   // Subgraph
   SUBGRAPH_URL: z.string().url(),
@@ -61,6 +64,7 @@ const envSchema = z.object({
 
   // Chainlink feeds (optional overrides)
   CHAINLINK_FEEDS_JSON: optionalJsonString(z.record(z.string(), z.string())),
+  CHAINLINK_FEEDS_BY_ADDRESS_JSON: optionalJsonString(z.record(z.string(), z.string())),
 
   // Pyth Network
   PYTH_WS_URL: z.string().url().default('wss://hermes.pyth.network/ws'),

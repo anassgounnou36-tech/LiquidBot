@@ -13,9 +13,10 @@ import { ExecutorClient } from './execution/executorClient.js';
 import { OneInchSwapBuilder } from './execution/oneInch.js';
 import { AttemptHistory } from './execution/attemptHistory.js';
 import { LiquidationAudit } from './audit/liquidationAudit.js';
-import { initChainlinkFeeds, initAddressToSymbolMapping, updateCachedPrice, cacheTokenDecimals } from './prices/priceMath.js';
+import { initChainlinkFeeds, initChainlinkFeedsByAddress, initAddressToSymbolMapping, updateCachedPrice, cacheTokenDecimals, setChainlinkListener } from './prices/priceMath.js';
 import { LiquidationPlanner } from './execution/liquidationPlanner.js';
 import { ProtocolDataProvider } from './aave/protocolDataProvider.js';
+import { metrics } from './metrics/metrics.js';
 
 // 1inch swap slippage tolerance
 // Should be adjusted based on market conditions and token pair liquidity
@@ -101,25 +102,54 @@ async function main() {
     
     const chainlinkListener = new ChainlinkListener();
     
+    // Collect all unique feed addresses to subscribe
+    const feedsToSubscribe = new Set<{ symbol: string; feedAddress: string }>();
+    
     // Initialize priceMath with Chainlink feeds
     if (config.CHAINLINK_FEEDS_JSON) {
       initChainlinkFeeds(config.CHAINLINK_FEEDS_JSON);
       for (const [symbol, feedAddress] of Object.entries(config.CHAINLINK_FEEDS_JSON)) {
         if (typeof feedAddress === 'string') {
-          chainlinkListener.addFeed(symbol, feedAddress);
+          feedsToSubscribe.add({ symbol, feedAddress });
         }
       }
     }
     
-    // Wire ChainlinkListener to priceMath.updateCachedPrice()
-    chainlinkListener.onPriceUpdate((update) => {
-      // Chainlink uses 8 decimals by default, normalize to 1e18
-      const decimals = 8;
-      const exponent = 18 - decimals;
-      const price1e18 = update.answer * (10n ** BigInt(exponent));
+    // Initialize address-to-feed mapping if provided (address-first pricing)
+    if (config.CHAINLINK_FEEDS_BY_ADDRESS_JSON) {
+      initChainlinkFeedsByAddress(config.CHAINLINK_FEEDS_BY_ADDRESS_JSON);
+      console.log('[v2] Address-first pricing enabled');
       
-      updateCachedPrice(update.symbol, price1e18);
-      console.log(`[v2] Price updated: ${update.symbol} = ${price1e18.toString()} (1e18)`);
+      // Subscribe ALL address-mapped feeds for realtime updates
+      for (const [tokenAddress, feedAddress] of Object.entries(config.CHAINLINK_FEEDS_BY_ADDRESS_JSON)) {
+        if (typeof feedAddress === 'string') {
+          feedsToSubscribe.add({ 
+            symbol: `addr:${tokenAddress}`, 
+            feedAddress 
+          });
+        }
+      }
+    }
+    
+    // Subscribe all unique feeds to ChainlinkListener
+    const uniqueFeeds = new Map<string, string>();
+    for (const { symbol, feedAddress } of feedsToSubscribe) {
+      uniqueFeeds.set(feedAddress.toLowerCase(), symbol);
+    }
+    
+    console.log(`[v2] Subscribing ${uniqueFeeds.size} unique Chainlink feeds...`);
+    for (const [feedAddress, symbol] of uniqueFeeds) {
+      await chainlinkListener.addFeed(symbol, feedAddress);
+    }
+    
+    // Register ChainlinkListener instance for cache-first lookups
+    setChainlinkListener(chainlinkListener);
+    
+    // Wire ChainlinkListener to priceMath.updateCachedPrice()
+    // Answer is already normalized to 1e18 by ChainlinkListener
+    chainlinkListener.onPriceUpdate((update) => {
+      updateCachedPrice(update.symbol, update.answer);
+      console.log(`[v2] Price updated: ${update.symbol} = ${update.answer.toString()} (1e18)`);
     });
     
     // Start Chainlink listener
@@ -145,9 +175,15 @@ async function main() {
     // 6. Setup execution components
     console.log('[v2] Phase 6: Setting up execution pipeline');
     
+    // Prepare broadcast RPC URLs
+    const broadcastRpcUrls = config.BROADCAST_RPC_URLS && config.BROADCAST_RPC_URLS.length > 0
+      ? config.BROADCAST_RPC_URLS
+      : [config.RPC_URL];
+    
     const executorClient = new ExecutorClient(
       config.EXECUTOR_ADDRESS,
-      config.EXECUTION_PRIVATE_KEY
+      config.EXECUTION_PRIVATE_KEY,
+      broadcastRpcUrls
     );
     const oneInchBuilder = new OneInchSwapBuilder(8453); // Base chain ID
     const liquidationPlanner = new LiquidationPlanner(config.AAVE_PROTOCOL_DATA_PROVIDER);
@@ -155,7 +191,12 @@ async function main() {
     
     console.log(`[v2] Executor client initialized (address=${executorClient.getAddress()})`);
     console.log(`[v2] Wallet address: ${executorClient.getWalletAddress()}`);
+    console.log(`[v2] Broadcast RPCs: ${broadcastRpcUrls.length}`);
     console.log(`[v2] Liquidation planner initialized\n`);
+    
+    // Start metrics logging (every 60 seconds)
+    metrics.startPeriodicLogging(60000);
+    console.log('[v2] Performance metrics enabled\n');
 
     // 7. Setup liquidation audit
     console.log('[v2] Phase 7: Setting up liquidation audit');
@@ -269,12 +310,23 @@ async function main() {
               expectedCollateralOut: plan.expectedCollateralOut
             });
             
-            if (result.success) {
+            if (result.status === 'mined') {
               console.log(`[execute] ✅ Liquidation successful! txHash=${result.txHash}`);
               attemptHistory.record({
                 user,
                 timestamp: Date.now(),
                 status: 'included',
+                txHash: result.txHash,
+                debtAsset: plan.debtAsset,
+                collateralAsset: plan.collateralAsset,
+                debtToCover: plan.debtToCover.toString()
+              });
+            } else if (result.status === 'pending') {
+              console.warn(`[execute] ⏳ Liquidation pending (not mined yet): txHash=${result.txHash}`);
+              attemptHistory.record({
+                user,
+                timestamp: Date.now(),
+                status: 'sent',
                 txHash: result.txHash,
                 debtAsset: plan.debtAsset,
                 collateralAsset: plan.collateralAsset,

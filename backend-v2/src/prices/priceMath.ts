@@ -2,6 +2,7 @@
 
 import { ethers } from 'ethers';
 import { getHttpProvider } from '../providers/rpc.js';
+import type { ChainlinkListener } from './ChainlinkListener.js';
 
 /**
  * Chainlink decimals cache
@@ -19,6 +20,12 @@ const priceCache = new Map<string, { price: bigint; timestamp: number }>();
 const chainlinkFeedAddresses = new Map<string, string>();
 
 /**
+ * Address to feed address mapping (lowercase token address -> feed address)
+ * For address-first pricing without symbol() calls
+ */
+const addressToFeedMap = new Map<string, string>();
+
+/**
  * Pyth feed ID cache
  */
 const pythFeedIds = new Map<string, string>();
@@ -33,6 +40,11 @@ const addressToSymbolMap = new Map<string, string>();
  * Token decimals cache (lowercase address -> decimals)
  */
 const tokenDecimalsCache = new Map<string, number>();
+
+/**
+ * ChainlinkListener instance for cache-first price lookups
+ */
+let chainlinkListenerInstance: ChainlinkListener | null = null;
 
 /**
  * Initialize Chainlink feed addresses from config
@@ -54,6 +66,18 @@ export function initChainlinkFeeds(feeds: Record<string, string>): void {
 }
 
 /**
+ * Initialize address-to-feed mapping from config (address-first pricing)
+ * @param feedsByAddress Mapping of token address to feed address
+ */
+export function initChainlinkFeedsByAddress(feedsByAddress: Record<string, string>): void {
+  for (const [tokenAddress, feedAddress] of Object.entries(feedsByAddress)) {
+    addressToFeedMap.set(tokenAddress.toLowerCase(), feedAddress.toLowerCase());
+  }
+  
+  console.log(`[priceMath] Initialized ${addressToFeedMap.size} address-to-feed mappings`);
+}
+
+/**
  * Initialize Pyth feed IDs from config
  */
 export function initPythFeeds(feeds: Record<string, string>): void {
@@ -64,7 +88,15 @@ export function initPythFeeds(feeds: Record<string, string>): void {
 }
 
 /**
- * Build address→symbol mapping from reserve tokens
+ * Set ChainlinkListener instance for cache-first price lookups
+ */
+export function setChainlinkListener(listener: ChainlinkListener): void {
+  chainlinkListenerInstance = listener;
+  console.log('[priceMath] ChainlinkListener instance registered for cache-first lookups');
+}
+
+/**
+ * Initialize address→symbol mapping from reserve tokens
  * Called at startup with results from ProtocolDataProvider.getAllReservesTokens()
  */
 export function initAddressToSymbolMapping(
@@ -167,8 +199,9 @@ async function fetchChainlinkPrice(symbol: string): Promise<bigint> {
 }
 
 /**
- * Fetch ratio feed composition: *_ETH × ETH_USD
+ * Fetch ratio feed composition: *_ETH × ETH_USD (CACHE-FIRST)
  * Example: WSTETH_ETH × ETH_USD = WSTETH_USD
+ * Uses cached prices for zero-RPC composition
  */
 async function fetchRatioFeedPrice(symbol: string): Promise<bigint> {
   // Check if this is a ratio feed (e.g., WSTETH, WEETH)
@@ -178,34 +211,54 @@ async function fetchRatioFeedPrice(symbol: string): Promise<bigint> {
     throw new Error(`${symbol} is not a ratio feed`);
   }
 
-  // Fetch *_ETH feed
+  // Get *_ETH feed address
   const ethRatioFeedAddress = chainlinkFeedAddresses.get(`${symbol}_ETH`);
   if (!ethRatioFeedAddress) {
     throw new Error(`No ${symbol}_ETH feed configured`);
   }
 
-  // Fetch ETH_USD feed
-  const ethUsdPrice = await fetchChainlinkPrice('ETH');
+  // Get ETH_USD feed address
+  const ethUsdFeedAddress = chainlinkFeedAddresses.get('ETH') || chainlinkFeedAddresses.get('WETH');
+  if (!ethUsdFeedAddress) {
+    throw new Error('No ETH/WETH feed configured for ratio composition');
+  }
 
-  // Fetch ratio price
-  const provider = getHttpProvider();
-  const ratioFeedContract = new ethers.Contract(
-    ethRatioFeedAddress,
-    ['function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80)'],
-    provider
-  );
+  // CACHE-FIRST: Try to get both prices from cache
+  let ratio: bigint | null = null;
+  let ethUsdPrice: bigint | null = null;
 
-  const [, ratioAnswer] = await ratioFeedContract.latestRoundData();
-  const ratioDecimals = await getChainlinkDecimals(ethRatioFeedAddress);
+  if (chainlinkListenerInstance) {
+    ratio = chainlinkListenerInstance.getCachedPrice(ethRatioFeedAddress);
+    ethUsdPrice = chainlinkListenerInstance.getCachedPrice(ethUsdFeedAddress);
+  }
 
-  // Normalize ratio to 1e18 using pure BigInt exponentiation
-  let ratio = BigInt(ratioAnswer.toString());
-  if (ratioDecimals < 18) {
-    const exponent = 18 - ratioDecimals;
-    ratio = ratio * (10n ** BigInt(exponent));
-  } else if (ratioDecimals > 18) {
-    const exponent = ratioDecimals - 18;
-    ratio = ratio / (10n ** BigInt(exponent));
+  // If either is missing, fall back to RPC
+  if (ratio === null) {
+    console.warn(`[priceMath] Cache miss for ${symbol}_ETH, falling back to RPC`);
+    const provider = getHttpProvider();
+    const ratioFeedContract = new ethers.Contract(
+      ethRatioFeedAddress,
+      ['function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80)'],
+      provider
+    );
+
+    const [, ratioAnswer] = await ratioFeedContract.latestRoundData();
+    const ratioDecimals = await getChainlinkDecimals(ethRatioFeedAddress);
+
+    // Normalize ratio to 1e18
+    ratio = BigInt(ratioAnswer.toString());
+    if (ratioDecimals < 18) {
+      const exponent = 18 - ratioDecimals;
+      ratio = ratio * (10n ** BigInt(exponent));
+    } else if (ratioDecimals > 18) {
+      const exponent = ratioDecimals - 18;
+      ratio = ratio / (10n ** BigInt(exponent));
+    }
+  }
+
+  if (ethUsdPrice === null) {
+    console.warn('[priceMath] Cache miss for ETH/USD, falling back to RPC');
+    ethUsdPrice = await fetchChainlinkPrice('ETH');
   }
 
   // Compose: ratio × ethUsdPrice (both 1e18)
@@ -244,21 +297,34 @@ async function fetchPythPrice(symbol: string): Promise<bigint> {
 
 /**
  * Get USD price for a symbol (normalized to 1e18 BigInt)
+ * CACHE-FIRST: Uses in-memory prices from ChainlinkListener (zero RPC calls in normal operation)
+ * Falls back to RPC only if cache miss on startup
  * Supports Chainlink direct feeds and ratio feeds
  * NOTE: Pyth is disabled in this version - use Chainlink feeds only
  */
 export async function getUsdPrice(symbol: string): Promise<bigint> {
   const normalizedSymbol = symbol.toUpperCase();
 
-  // Check cache first (with TTL)
-  const cached = priceCache.get(normalizedSymbol);
-  const now = Date.now();
-  const cacheTtlMs = 30000; // 30 seconds
+  // Resolve symbol to feed address
+  const feedAddress = chainlinkFeedAddresses.get(normalizedSymbol);
   
-  if (cached && (now - cached.timestamp) < cacheTtlMs) {
-    return cached.price;
+  // CACHE-FIRST: Try to get price from ChainlinkListener cache
+  if (feedAddress && chainlinkListenerInstance) {
+    const cachedPrice = chainlinkListenerInstance.getCachedPrice(feedAddress);
+    if (cachedPrice !== null) {
+      return cachedPrice; // Zero RPC calls
+    }
+    console.warn(`[priceMath] Cache miss for ${normalizedSymbol}, falling back to RPC`);
+  }
+  
+  // For ratio feeds, check if they have a specific feed
+  const ratioFeedAddress = chainlinkFeedAddresses.get(`${normalizedSymbol}_ETH`);
+  if (ratioFeedAddress && chainlinkListenerInstance) {
+    // Try cached ratio feed composition
+    return fetchRatioFeedPrice(normalizedSymbol);
   }
 
+  // Fallback: Fetch from RPC (only on startup or cache miss)
   let price: bigint;
 
   // Try Chainlink direct feed
@@ -274,7 +340,8 @@ export async function getUsdPrice(symbol: string): Promise<bigint> {
     throw new Error(`No Chainlink price feed configured for ${normalizedSymbol}. Pyth is disabled in this version.`);
   }
 
-  // Cache the price
+  // Cache the price in local cache (for backward compatibility with TTL checks)
+  const now = Date.now();
   priceCache.set(normalizedSymbol, { price, timestamp: now });
 
   return price;
@@ -282,13 +349,54 @@ export async function getUsdPrice(symbol: string): Promise<bigint> {
 
 /**
  * Get USD price for a token address (normalized to 1e18 BigInt)
- * Resolves address→symbol via mapping, then fetches price
- * Supports Chainlink direct feeds and ratio feeds
+ * CACHE-FIRST: Uses in-memory prices from ChainlinkListener (zero RPC calls in normal operation)
+ * Falls back to RPC only if cache miss on startup
+ * 
+ * Supports:
+ * - Direct feeds via address-to-feed mapping
+ * - Symbol-based feeds via address→symbol→feed mapping
+ * - Ratio feeds (WEETH, WSTETH, CBETH) via cached composition
  */
 export async function getUsdPriceForAddress(address: string): Promise<bigint> {
   const normalizedAddress = address.toLowerCase();
   
-  // Resolve address to symbol
+  // Try address-to-feed mapping first (address-first pricing)
+  const feedAddress = addressToFeedMap.get(normalizedAddress);
+  if (feedAddress) {
+    // CACHE-FIRST: Get price from ChainlinkListener cache
+    if (chainlinkListenerInstance) {
+      const cachedPrice = chainlinkListenerInstance.getCachedPrice(feedAddress);
+      if (cachedPrice !== null) {
+        return cachedPrice;
+      }
+      console.warn(`[priceMath] Cache miss for feed ${feedAddress}, falling back to RPC`);
+    }
+    
+    // Fallback: Fetch from RPC (only on startup or cache miss)
+    const provider = getHttpProvider();
+    const feedContract = new ethers.Contract(
+      feedAddress,
+      ['function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80)'],
+      provider
+    );
+
+    const [, answer] = await feedContract.latestRoundData();
+    const decimals = await getChainlinkDecimals(feedAddress);
+
+    // Normalize to 1e18 using pure BigInt exponentiation
+    const price = BigInt(answer.toString());
+    if (decimals === 18) {
+      return price;
+    } else if (decimals < 18) {
+      const exponent = 18 - decimals;
+      return price * (10n ** BigInt(exponent));
+    } else {
+      const exponent = decimals - 18;
+      return price / (10n ** BigInt(exponent));
+    }
+  }
+  
+  // Fall back to address→symbol mapping (legacy path)
   const symbol = addressToSymbolMap.get(normalizedAddress);
   
   if (!symbol) {
