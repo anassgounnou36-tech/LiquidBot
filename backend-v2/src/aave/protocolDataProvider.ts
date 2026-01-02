@@ -29,11 +29,17 @@ export interface ReserveToken {
 
 /**
  * ProtocolDataProvider: Query Aave Protocol Data Provider for current user reserves
+ * Includes caching for reserves list, decimals, and liquidation bonuses
  */
 export class ProtocolDataProvider {
   private provider: ethers.JsonRpcProvider;
   private dataProviderAddress: string;
   private contract: ethers.Contract;
+  
+  // Caches
+  private reservesCache: ReserveToken[] | null = null;
+  private reserveConfigCache = new Map<string, any>();
+  private tokenDecimalsCache = new Map<string, number>();
 
   constructor(dataProviderAddress: string) {
     this.provider = getHttpProvider();
@@ -73,34 +79,44 @@ export class ProtocolDataProvider {
 
   /**
    * Get all user reserves (all assets in the pool)
+   * Uses concurrent fetching with Promise.all for performance
    */
   async getAllUserReserves(user: string): Promise<UserReserveData[]> {
-    // Get all reserve tokens
-    const allReserves = await this.contract.getAllReservesTokens();
+    // Get all reserve tokens (use cache if available)
+    const allReserves = await this.getAllReservesTokens();
     
+    // Fetch all reserves concurrently with a concurrency limit
+    const CONCURRENCY_LIMIT = 10;
     const reserves: UserReserveData[] = [];
     
-    // Query each reserve for user data
-    for (const reserve of allReserves) {
-      const tokenAddress = reserve.tokenAddress;
+    // Process in batches to limit concurrency
+    for (let i = 0; i < allReserves.length; i += CONCURRENCY_LIMIT) {
+      const batch = allReserves.slice(i, i + CONCURRENCY_LIMIT);
       
-      try {
-        const userReserve = await this.getUserReserveData(tokenAddress, user);
-        
-        // Only include if user has balance or debt
-        if (
-          userReserve.currentATokenBalance > 0n ||
-          userReserve.currentStableDebt > 0n ||
-          userReserve.currentVariableDebt > 0n
-        ) {
-          reserves.push(userReserve);
+      const batchPromises = batch.map(async (reserve) => {
+        try {
+          const userReserve = await this.getUserReserveData(reserve.tokenAddress, user);
+          
+          // Only include if user has balance or debt
+          if (
+            userReserve.currentATokenBalance > 0n ||
+            userReserve.currentStableDebt > 0n ||
+            userReserve.currentVariableDebt > 0n
+          ) {
+            return userReserve;
+          }
+          return null;
+        } catch (err) {
+          console.warn(
+            `[protocolDataProvider] Failed to query reserve ${reserve.symbol}:`,
+            err instanceof Error ? err.message : err
+          );
+          return null;
         }
-      } catch (err) {
-        console.warn(
-          `[protocolDataProvider] Failed to query reserve ${reserve.symbol}:`,
-          err instanceof Error ? err.message : err
-        );
-      }
+      });
+      
+      const batchResults = await Promise.all(batchPromises);
+      reserves.push(...batchResults.filter((r): r is UserReserveData => r !== null));
     }
     
     return reserves;
@@ -108,6 +124,7 @@ export class ProtocolDataProvider {
 
   /**
    * Get reserve configuration data including liquidation bonus
+   * Uses cache for performance
    */
   async getReserveConfigurationData(asset: string): Promise<{
     decimals: number;
@@ -121,9 +138,16 @@ export class ProtocolDataProvider {
     isActive: boolean;
     isFrozen: boolean;
   }> {
+    const normalizedAsset = asset.toLowerCase();
+    
+    // Check cache first
+    if (this.reserveConfigCache.has(normalizedAsset)) {
+      return this.reserveConfigCache.get(normalizedAsset)!;
+    }
+    
     const result = await this.contract.getReserveConfigurationData(asset);
     
-    return {
+    const config = {
       decimals: Number(result.decimals),
       ltv: Number(result.ltv),
       liquidationThreshold: Number(result.liquidationThreshold),
@@ -135,16 +159,30 @@ export class ProtocolDataProvider {
       isActive: result.isActive,
       isFrozen: result.isFrozen
     };
+    
+    // Cache the result
+    this.reserveConfigCache.set(normalizedAsset, config);
+    
+    return config;
   }
 
   /**
    * Get all reserve tokens
+   * Uses cache for performance
    */
   async getAllReservesTokens(): Promise<ReserveToken[]> {
+    // Check cache first
+    if (this.reservesCache !== null) {
+      return this.reservesCache;
+    }
+    
     const result = await this.contract.getAllReservesTokens();
-    return result.map((r: any) => ({
+    const reserves = result.map((r: any) => ({
       symbol: r.symbol,
       tokenAddress: r.tokenAddress
     }));
+    
+    this.reservesCache = reserves;
+    return reserves;
   }
 }

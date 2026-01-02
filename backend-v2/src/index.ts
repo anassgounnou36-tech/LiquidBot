@@ -257,7 +257,7 @@ async function main() {
             
             console.log(`[execute] 1inch swap quote obtained: minOut=${swapQuote.minOut}`);
             
-            // Execute liquidation with correct amounts
+            // Execute liquidation with correct amounts and safety checks
             const result = await executorClient.attemptLiquidation({
               user,
               collateralAsset: plan.collateralAsset,
@@ -265,7 +265,8 @@ async function main() {
               debtToCover: plan.debtToCover,
               oneInchCalldata: swapQuote.data,
               minOut: BigInt(swapQuote.minOut),
-              payout: executorClient.getWalletAddress()
+              payout: executorClient.getWalletAddress(),
+              expectedCollateralOut: plan.expectedCollateralOut
             });
             
             if (result.success) {

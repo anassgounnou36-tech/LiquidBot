@@ -2,7 +2,7 @@
 
 import { ethers } from 'ethers';
 import { ProtocolDataProvider, type UserReserveData } from '../aave/protocolDataProvider.js';
-import { getUsdPrice } from '../prices/priceMath.js';
+import { getUsdPriceForAddress, getTokenDecimals } from '../prices/priceMath.js';
 import { getHttpProvider } from '../providers/rpc.js';
 
 /**
@@ -16,6 +16,22 @@ export interface LiquidationPlan {
   expectedCollateralOut: bigint; // In collateral token units
   debtAssetDecimals: number;
   collateralAssetDecimals: number;
+  liquidationBonusBps: number;
+  profitUsd: number; // Conservative profit estimate with haircut
+  executionTimeMs: number; // Execution time for logging
+}
+
+/**
+ * Pair score for selection
+ */
+interface PairScore {
+  debtReserve: UserReserveData;
+  collateralReserve: UserReserveData;
+  score: number; // Conservative profit in USD with haircut
+  debtUsd1e18: bigint;
+  collateralUsd1e18: bigint;
+  expectedCollateralOut: bigint;
+  debtToCover: bigint;
   liquidationBonusBps: number;
 }
 
@@ -36,6 +52,8 @@ export class LiquidationPlanner {
    * Computes debtToCover and expectedCollateralOut in correct token units
    */
   async buildPlan(user: string): Promise<LiquidationPlan | null> {
+    const startTime = Date.now();
+    
     // Get all user reserves
     const reserves = await this.dataProvider.getAllUserReserves(user);
     
@@ -64,7 +82,7 @@ export class LiquidationPlanner {
       return null;
     }
 
-    // Step 3: Select best debt and collateral pair by USD value
+    // Step 3: Select best debt and collateral pair by scoring
     const bestPair = await this.selectBestPair(debtPositions, collateralPositions);
     
     if (!bestPair) {
@@ -72,62 +90,28 @@ export class LiquidationPlanner {
       return null;
     }
 
-    const { debtReserve, collateralReserve } = bestPair;
+    const { debtReserve, collateralReserve, score, debtToCover, expectedCollateralOut, liquidationBonusBps } = bestPair;
 
-    // Step 4: Get token decimals
-    const debtTokenContract = new ethers.Contract(
-      debtReserve.underlyingAsset,
-      ['function decimals() external view returns (uint8)'],
-      this.provider
-    );
-    const collateralTokenContract = new ethers.Contract(
-      collateralReserve.underlyingAsset,
-      ['function decimals() external view returns (uint8)'],
-      this.provider
-    );
+    // Step 4: Get token decimals (use cached values)
+    const debtDecimals = await getTokenDecimals(debtReserve.underlyingAsset);
+    const collateralDecimals = await getTokenDecimals(collateralReserve.underlyingAsset);
 
-    const debtDecimals = Number(await debtTokenContract.decimals());
-    const collateralDecimals = Number(await collateralTokenContract.decimals());
-
-    // Step 5: Calculate total debt in token units
-    const totalDebtTokenAmount = debtReserve.currentVariableDebt + debtReserve.currentStableDebt;
-
-    // Step 6: Apply close factor (fixed 50% = 5000 BPS)
-    const CLOSE_FACTOR_BPS = 5000n;
-    const debtToCover = (totalDebtTokenAmount * CLOSE_FACTOR_BPS) / 10000n;
-
-    console.log(
-      `[liquidationPlanner] Debt to cover: ${debtToCover.toString()} (50% of ${totalDebtTokenAmount.toString()})`
-    );
-
-    // Step 7: Get liquidation bonus for collateral asset
-    const collateralConfig = await this.dataProvider.getReserveConfigurationData(
-      collateralReserve.underlyingAsset
-    );
+    const executionTimeMs = Date.now() - startTime;
     
-    // Aave liquidation bonus is in basis points (e.g., 10500 = 105% = 5% bonus)
-    // We need just the bonus part (e.g., 500 BPS = 5%)
-    const liquidationBonusBps = collateralConfig.liquidationBonus > 10000 
-      ? collateralConfig.liquidationBonus - 10000
-      : 500; // Fallback to 5% if format is different
-
     console.log(
-      `[liquidationPlanner] Liquidation bonus: ${liquidationBonusBps} BPS (${liquidationBonusBps / 100}%)`
+      `[liquidationPlanner] Plan built in ${executionTimeMs}ms for user ${user}`
     );
-
-    // Step 8: Calculate expected collateral seized
-    // Formula: collateralOut = debtToCover * debtPrice / collateralPrice * (1 + bonus)
-    const expectedCollateralOut = await this.calculateExpectedCollateral(
-      debtToCover,
-      debtReserve.underlyingAsset,
-      debtDecimals,
-      collateralReserve.underlyingAsset,
-      collateralDecimals,
-      liquidationBonusBps
-    );
-
     console.log(
-      `[liquidationPlanner] Expected collateral out: ${expectedCollateralOut.toString()} (with ${liquidationBonusBps / 100}% bonus)`
+      `[liquidationPlanner] Debt to cover: ${debtToCover.toString()} (50% of total)`
+    );
+    console.log(
+      `[liquidationPlanner] Expected collateral out: ${expectedCollateralOut.toString()}`
+    );
+    console.log(
+      `[liquidationPlanner] Liquidation bonus: ${liquidationBonusBps} BPS`
+    );
+    console.log(
+      `[liquidationPlanner] Conservative profit: $${score.toFixed(2)}`
     );
 
     return {
@@ -138,68 +122,148 @@ export class LiquidationPlanner {
       expectedCollateralOut,
       debtAssetDecimals: debtDecimals,
       collateralAssetDecimals: collateralDecimals,
-      liquidationBonusBps
+      liquidationBonusBps,
+      profitUsd: score,
+      executionTimeMs
     };
   }
 
   /**
-   * Select best debt and collateral pair by USD value
+   * Select best debt and collateral pair by scoring
+   * Uses address-based price lookups (no symbol() calls)
+   * Scores by conservative profit: collateralOut - debtToCover (in USD) with haircut
    */
   private async selectBestPair(
     debtPositions: UserReserveData[],
     collateralPositions: UserReserveData[]
-  ): Promise<{ debtReserve: UserReserveData; collateralReserve: UserReserveData } | null> {
-    let bestPair: { debtReserve: UserReserveData; collateralReserve: UserReserveData; debtUsd: bigint } | null = null;
+  ): Promise<PairScore | null> {
+    const TOP_N_PAIRS = 3; // Only score top N pairs
+    const CONSERVATIVE_HAIRCUT_BPS = 200; // 2% haircut for slippage/fees
+    const CLOSE_FACTOR_BPS = 5000n; // 50%
+    
+    const scoredPairs: PairScore[] = [];
 
-    // For each debt position, find corresponding collateral
+    // Score each debt-collateral pair
     for (const debtReserve of debtPositions) {
       const totalDebt = debtReserve.currentVariableDebt + debtReserve.currentStableDebt;
+      const debtToCover = (totalDebt * CLOSE_FACTOR_BPS) / 10000n;
       
       try {
-        // Get debt USD value (simplified: use address as lookup key)
-        // In production, you'd map address to symbol
-        const debtUsd = await this.estimateUsdValue(
-          debtReserve.underlyingAsset,
-          totalDebt
-        );
+        // Get debt price using address-based lookup
+        const debtPriceUsd1e18 = await getUsdPriceForAddress(debtReserve.underlyingAsset);
+        const debtDecimals = await getTokenDecimals(debtReserve.underlyingAsset);
+        
+        // Calculate debt USD value
+        const debtUsd1e18 = this.calculateUsdValue(debtToCover, debtDecimals, debtPriceUsd1e18);
 
-        // Find largest collateral position
+        // Score each collateral option for this debt
         for (const collateralReserve of collateralPositions) {
-          if (!bestPair || debtUsd > bestPair.debtUsd) {
-            bestPair = {
-              debtReserve,
-              collateralReserve,
-              debtUsd
-            };
+          try {
+            // Get collateral price using address-based lookup
+            const collateralPriceUsd1e18 = await getUsdPriceForAddress(collateralReserve.underlyingAsset);
+            const collateralDecimals = await getTokenDecimals(collateralReserve.underlyingAsset);
+            
+            // Get liquidation bonus
+            const collateralConfig = await this.dataProvider.getReserveConfigurationData(
+              collateralReserve.underlyingAsset
+            );
+            const liquidationBonusBps = collateralConfig.liquidationBonus > 10000 
+              ? collateralConfig.liquidationBonus - 10000
+              : 500;
+
+            // Calculate expected collateral out
+            const expectedCollateralOut = this.calculateExpectedCollateral(
+              debtToCover,
+              debtDecimals,
+              debtPriceUsd1e18,
+              collateralDecimals,
+              collateralPriceUsd1e18,
+              liquidationBonusBps
+            );
+
+            // Check if we have enough collateral
+            if (expectedCollateralOut > collateralReserve.currentATokenBalance) {
+              // Not enough collateral, skip this pair
+              continue;
+            }
+
+            // Calculate collateral out USD value
+            const collateralOutUsd1e18 = this.calculateUsdValue(
+              expectedCollateralOut,
+              collateralDecimals,
+              collateralPriceUsd1e18
+            );
+
+            // Calculate conservative profit with haircut
+            const profitUsd1e18 = collateralOutUsd1e18 - debtUsd1e18;
+            const haircutAmount = (profitUsd1e18 * BigInt(CONSERVATIVE_HAIRCUT_BPS)) / 10000n;
+            const conservativeProfitUsd1e18 = profitUsd1e18 - haircutAmount;
+
+            // Convert to number for scoring (safe because USD values are small)
+            const score = Number(conservativeProfitUsd1e18) / 1e18;
+
+            // Only consider profitable pairs
+            if (score > 0) {
+              scoredPairs.push({
+                debtReserve,
+                collateralReserve,
+                score,
+                debtUsd1e18,
+                collateralUsd1e18: collateralOutUsd1e18,
+                expectedCollateralOut,
+                debtToCover,
+                liquidationBonusBps
+              });
+            }
+          } catch (err) {
+            console.warn(
+              `[liquidationPlanner] Failed to score collateral ${collateralReserve.underlyingAsset}:`,
+              err instanceof Error ? err.message : err
+            );
           }
         }
       } catch (err) {
         console.warn(
-          `[liquidationPlanner] Failed to get USD value for debt asset ${debtReserve.underlyingAsset}:`,
+          `[liquidationPlanner] Failed to score debt ${debtReserve.underlyingAsset}:`,
           err instanceof Error ? err.message : err
         );
       }
     }
 
-    return bestPair ? { debtReserve: bestPair.debtReserve, collateralReserve: bestPair.collateralReserve } : null;
+    if (scoredPairs.length === 0) {
+      return null;
+    }
+
+    // Sort by score (descending) and take top N
+    scoredPairs.sort((a, b) => b.score - a.score);
+    const topPairs = scoredPairs.slice(0, TOP_N_PAIRS);
+
+    console.log(`[liquidationPlanner] Scored ${scoredPairs.length} pairs, top ${topPairs.length}:`);
+    for (let i = 0; i < topPairs.length; i++) {
+      const pair = topPairs[i];
+      console.log(
+        `[liquidationPlanner]   ${i + 1}. Debt: ${pair.debtReserve.underlyingAsset.substring(0, 10)}... ` +
+        `Collateral: ${pair.collateralReserve.underlyingAsset.substring(0, 10)}... ` +
+        `Score: $${pair.score.toFixed(2)}`
+      );
+    }
+
+    // Return best scoring pair
+    return topPairs[0];
   }
 
   /**
-   * Calculate expected collateral seized
-   * All math in BigInt with proper decimal scaling
+   * Calculate expected collateral seized (pure BigInt math)
+   * Formula: collateralOut = debtToCover * debtPrice / collateralPrice * (1 + bonus)
    */
-  private async calculateExpectedCollateral(
+  private calculateExpectedCollateral(
     debtToCover: bigint,
-    debtAsset: string,
     debtDecimals: number,
-    collateralAsset: string,
+    debtPriceUsd1e18: bigint,
     collateralDecimals: number,
+    collateralPriceUsd1e18: bigint,
     liquidationBonusBps: number
-  ): Promise<bigint> {
-    // Get prices (1e18 scaled)
-    const debtPriceUsd1e18 = await getUsdPrice(await this.getSymbolForAddress(debtAsset));
-    const collateralPriceUsd1e18 = await getUsdPrice(await this.getSymbolForAddress(collateralAsset));
-
+  ): bigint {
     // Convert debtToCover to 1e18 scale
     let debtToCover1e18: bigint;
     if (debtDecimals === 18) {
@@ -233,40 +297,14 @@ export class LiquidationPlanner {
   }
 
   /**
-   * Get symbol for token address
-   * TODO: Implement proper address-to-symbol mapping
-   * For now, try to query token contract or use fallback
+   * Calculate USD value from token amount (pure BigInt math)
+   * Returns USD value in 1e18 scale
    */
-  private async getSymbolForAddress(address: string): Promise<string> {
-    try {
-      const tokenContract = new ethers.Contract(
-        address,
-        ['function symbol() external view returns (string)'],
-        this.provider
-      );
-      return await tokenContract.symbol();
-    } catch (err) {
-      // Fallback: return address if symbol query fails
-      console.warn(`[liquidationPlanner] Could not get symbol for ${address}, using address`);
-      return address;
-    }
-  }
-
-  /**
-   * Estimate USD value of a token amount
-   */
-  private async estimateUsdValue(asset: string, amount: bigint): Promise<bigint> {
-    const symbol = await this.getSymbolForAddress(asset);
-    const priceUsd1e18 = await getUsdPrice(symbol);
-    
-    // Get token decimals
-    const tokenContract = new ethers.Contract(
-      asset,
-      ['function decimals() external view returns (uint8)'],
-      this.provider
-    );
-    const decimals = Number(await tokenContract.decimals());
-
+  private calculateUsdValue(
+    amount: bigint,
+    decimals: number,
+    priceUsd1e18: bigint
+  ): bigint {
     // Normalize amount to 1e18
     let amount1e18: bigint;
     if (decimals === 18) {
@@ -277,7 +315,7 @@ export class LiquidationPlanner {
       amount1e18 = amount / (10n ** BigInt(decimals - 18));
     }
 
-    // Calculate USD value
+    // Calculate USD value (1e18 scale)
     return (amount1e18 * priceUsd1e18) / (10n ** 18n);
   }
 }
