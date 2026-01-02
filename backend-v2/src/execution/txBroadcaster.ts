@@ -31,6 +31,8 @@ export interface BroadcastOptions {
  */
 export class TxBroadcaster {
   private options: Required<BroadcastOptions>;
+  private providers: ethers.JsonRpcProvider[];
+  private monitorProvider: ethers.JsonRpcProvider;
 
   constructor(options: BroadcastOptions) {
     this.options = {
@@ -39,20 +41,25 @@ export class TxBroadcaster {
       maxReplacements: options.maxReplacements || 3,
       priorityFeeBumpPercent: options.priorityFeeBumpPercent || 20
     };
+
+    // Create providers once during initialization to avoid per-tx overhead
+    this.providers = this.options.rpcUrls.map(url => new ethers.JsonRpcProvider(url));
+    this.monitorProvider = this.providers[0];
+    
+    console.log(`[txBroadcaster] Initialized with ${this.providers.length} RPC providers`);
   }
 
   /**
-   * Broadcast signed raw transaction to all RPCs
+   * Broadcast signed raw transaction to all RPCs using reusable providers
    */
   private async broadcastToAllRpcs(signedTx: string): Promise<string | null> {
-    const promises = this.options.rpcUrls.map(async (rpcUrl) => {
+    const promises = this.providers.map(async (provider, index) => {
       try {
-        const provider = new ethers.JsonRpcProvider(rpcUrl);
         const tx = await provider.broadcastTransaction(signedTx);
-        console.log(`[txBroadcaster] Broadcast to ${rpcUrl}: ${tx.hash}`);
+        console.log(`[txBroadcaster] Broadcast to RPC ${index + 1}: ${tx.hash}`);
         return tx.hash;
       } catch (err) {
-        console.warn(`[txBroadcaster] Failed to broadcast to ${rpcUrl}:`, err instanceof Error ? err.message : err);
+        console.warn(`[txBroadcaster] Failed to broadcast to RPC ${index + 1}:`, err instanceof Error ? err.message : err);
         return null;
       }
     });
@@ -87,9 +94,6 @@ export class TxBroadcaster {
     txRequest: ethers.TransactionRequest
   ): Promise<BroadcastResult> {
     try {
-      // Use first RPC for monitoring
-      const monitorProvider = new ethers.JsonRpcProvider(this.options.rpcUrls[0]);
-      
       // Initial transaction
       let currentPriorityFee = txRequest.maxPriorityFeePerGas || ethers.parseUnits('1', 'gwei');
       let currentMaxFee = txRequest.maxFeePerGas || ethers.parseUnits('50', 'gwei');
@@ -102,6 +106,7 @@ export class TxBroadcaster {
       }
 
       let lastTxHash: string | null = null;
+      let broadcastSucceededOnce = false;
 
       for (let attempt = 0; attempt <= this.options.maxReplacements; attempt++) {
         // Sign transaction
@@ -120,7 +125,17 @@ export class TxBroadcaster {
         
         if (!txHash) {
           console.error('[txBroadcaster] Failed to broadcast to any RPC');
+          // If this was the last attempt and we never successfully broadcast
           if (attempt === this.options.maxReplacements) {
+            // If we had a previous successful broadcast, it may still be pending
+            if (broadcastSucceededOnce && lastTxHash) {
+              return {
+                status: 'pending',
+                txHash: lastTxHash,
+                rpcUsed: this.options.rpcUrls[0]
+              };
+            }
+            // Otherwise, it's a complete failure
             return {
               status: 'failed',
               error: 'Failed to broadcast to any RPC',
@@ -131,11 +146,12 @@ export class TxBroadcaster {
         }
 
         lastTxHash = txHash;
+        broadcastSucceededOnce = true;
 
         // Wait for inclusion or delay
         const startTime = Date.now();
         while (Date.now() - startTime < this.options.replacementDelayMs) {
-          const receipt = await this.getTxReceipt(txHash, monitorProvider);
+          const receipt = await this.getTxReceipt(txHash, this.monitorProvider);
           
           if (receipt !== null) {
             // Check if transaction succeeded
@@ -163,7 +179,7 @@ export class TxBroadcaster {
 
         console.log(`[txBroadcaster] Transaction not mined after ${this.options.replacementDelayMs}ms`);
 
-        // If this was the last attempt, return pending status
+        // If this was the last attempt, return pending status (tx may still land)
         if (attempt === this.options.maxReplacements) {
           console.log(`[txBroadcaster] Max replacements reached, tx still pending: ${txHash}`);
           return {
@@ -181,11 +197,21 @@ export class TxBroadcaster {
         console.log(`[txBroadcaster] Bumping fees and replacing...`);
       }
 
-      return {
-        status: 'failed',
-        error: 'Failed after all replacement attempts',
-        lastTxHash: lastTxHash || undefined
-      };
+      // This should never be reached due to the logic above, but included for completeness
+      // If we have a txHash, it's pending; otherwise it's failed
+      if (lastTxHash) {
+        return {
+          status: 'pending',
+          txHash: lastTxHash,
+          rpcUsed: this.options.rpcUrls[0]
+        };
+      } else {
+        return {
+          status: 'failed',
+          error: 'Failed after all replacement attempts',
+          lastTxHash: undefined
+        };
+      }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error('[txBroadcaster] Broadcast failed:', errorMsg);
