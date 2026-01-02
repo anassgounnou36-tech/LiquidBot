@@ -31,6 +31,7 @@ export class ChainlinkListener {
   private dedupeCache: Set<string> = new Set(); // roundId:feedAddress
   private contracts: Map<string, Contract> = new Map(); // feedAddress -> Contract
   private decimalsCache: Map<string, number> = new Map(); // feedAddress -> decimals
+  private latestPrice1e18: Map<string, bigint> = new Map(); // feedAddress -> normalized price
 
   /**
    * Add a price feed to monitor
@@ -154,6 +155,9 @@ export class ChainlinkListener {
         normalizedAnswer = rawAnswer / (10n ** BigInt(exponent));
       }
 
+      // Update in-memory price cache
+      this.latestPrice1e18.set(feedAddress, normalizedAnswer);
+
       // Notify callbacks with normalized answer
       const update: ChainlinkPriceUpdate = {
         symbol,
@@ -177,6 +181,15 @@ export class ChainlinkListener {
     } catch (err) {
       console.error('[chainlink] Error parsing log:', err);
     }
+  }
+
+  /**
+   * Get cached price for a feed address (returns null if not cached)
+   * This enables zero-RPC price lookups during planner execution
+   */
+  getCachedPrice(feedAddress: string): bigint | null {
+    const normalizedAddress = feedAddress.toLowerCase();
+    return this.latestPrice1e18.get(normalizedAddress) || null;
   }
 
   /**

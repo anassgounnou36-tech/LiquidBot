@@ -13,7 +13,7 @@ import { ExecutorClient } from './execution/executorClient.js';
 import { OneInchSwapBuilder } from './execution/oneInch.js';
 import { AttemptHistory } from './execution/attemptHistory.js';
 import { LiquidationAudit } from './audit/liquidationAudit.js';
-import { initChainlinkFeeds, initChainlinkFeedsByAddress, initAddressToSymbolMapping, updateCachedPrice, cacheTokenDecimals } from './prices/priceMath.js';
+import { initChainlinkFeeds, initChainlinkFeedsByAddress, initAddressToSymbolMapping, updateCachedPrice, cacheTokenDecimals, setChainlinkListener } from './prices/priceMath.js';
 import { LiquidationPlanner } from './execution/liquidationPlanner.js';
 import { ProtocolDataProvider } from './aave/protocolDataProvider.js';
 import { metrics } from './metrics/metrics.js';
@@ -102,12 +102,15 @@ async function main() {
     
     const chainlinkListener = new ChainlinkListener();
     
+    // Collect all unique feed addresses to subscribe
+    const feedsToSubscribe = new Set<{ symbol: string; feedAddress: string }>();
+    
     // Initialize priceMath with Chainlink feeds
     if (config.CHAINLINK_FEEDS_JSON) {
       initChainlinkFeeds(config.CHAINLINK_FEEDS_JSON);
       for (const [symbol, feedAddress] of Object.entries(config.CHAINLINK_FEEDS_JSON)) {
         if (typeof feedAddress === 'string') {
-          await chainlinkListener.addFeed(symbol, feedAddress);
+          feedsToSubscribe.add({ symbol, feedAddress });
         }
       }
     }
@@ -116,7 +119,31 @@ async function main() {
     if (config.CHAINLINK_FEEDS_BY_ADDRESS_JSON) {
       initChainlinkFeedsByAddress(config.CHAINLINK_FEEDS_BY_ADDRESS_JSON);
       console.log('[v2] Address-first pricing enabled');
+      
+      // Subscribe ALL address-mapped feeds for realtime updates
+      for (const [tokenAddress, feedAddress] of Object.entries(config.CHAINLINK_FEEDS_BY_ADDRESS_JSON)) {
+        if (typeof feedAddress === 'string') {
+          feedsToSubscribe.add({ 
+            symbol: `addr:${tokenAddress}`, 
+            feedAddress 
+          });
+        }
+      }
     }
+    
+    // Subscribe all unique feeds to ChainlinkListener
+    const uniqueFeeds = new Map<string, string>();
+    for (const { symbol, feedAddress } of feedsToSubscribe) {
+      uniqueFeeds.set(feedAddress.toLowerCase(), symbol);
+    }
+    
+    console.log(`[v2] Subscribing ${uniqueFeeds.size} unique Chainlink feeds...`);
+    for (const [feedAddress, symbol] of uniqueFeeds) {
+      await chainlinkListener.addFeed(symbol, feedAddress);
+    }
+    
+    // Register ChainlinkListener instance for cache-first lookups
+    setChainlinkListener(chainlinkListener);
     
     // Wire ChainlinkListener to priceMath.updateCachedPrice()
     // Answer is already normalized to 1e18 by ChainlinkListener
