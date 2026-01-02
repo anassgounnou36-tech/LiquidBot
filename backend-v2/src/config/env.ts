@@ -34,6 +34,11 @@ const envSchema = z.object({
 
   // Aave V3 Pool
   AAVE_POOL_ADDRESS: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  AAVE_PROTOCOL_DATA_PROVIDER: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+
+  // Aave base currency configuration
+  AAVE_BASE_CURRENCY_DECIMALS: z.coerce.number().min(0).max(18).default(8),
+  AAVE_BASE_CURRENCY_IS_USD: z.string().transform(val => val === 'true').default('false'),
 
   // Risk thresholds
   MIN_DEBT_USD: z.coerce.number().min(0).default(50.0),

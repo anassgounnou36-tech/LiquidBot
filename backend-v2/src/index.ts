@@ -1,7 +1,5 @@
 // index.ts: Main entry point for backend-v2 (v2-realtime-pipeline-clean)
 
-import { ethers } from 'ethers';
-import { getHttpProvider } from './providers/rpc.js';
 import { seedBorrowerUniverse } from './subgraph/universe.js';
 import { ActiveRiskSet } from './risk/ActiveRiskSet.js';
 import { HealthFactorChecker } from './risk/HealthFactorChecker.js';
@@ -11,17 +9,12 @@ import { config } from './config/index.js';
 import { DirtyQueue } from './realtime/dirtyQueue.js';
 import { AavePoolListeners } from './realtime/aavePoolListeners.js';
 import { VerifierLoop } from './risk/verifierLoop.js';
-import { PairSelector } from './risk/pairSelector.js';
 import { ExecutorClient } from './execution/executorClient.js';
 import { OneInchSwapBuilder } from './execution/oneInch.js';
 import { AttemptHistory } from './execution/attemptHistory.js';
 import { LiquidationAudit } from './audit/liquidationAudit.js';
 import { initChainlinkFeeds } from './prices/priceMath.js';
-
-// Liquidation execution constants
-// Note: Aave V3 liquidation bonus varies by asset (typically 5-10%)
-// This is a conservative estimate; production should query per-asset bonus
-const LIQUIDATION_BONUS_BPS = 500; // 5% = 500 basis points
+import { LiquidationPlanner } from './execution/liquidationPlanner.js';
 
 // 1inch swap slippage tolerance
 // Should be adjusted based on market conditions and token pair liquidity
@@ -124,11 +117,12 @@ async function main() {
       config.EXECUTION_PRIVATE_KEY
     );
     const oneInchBuilder = new OneInchSwapBuilder(8453); // Base chain ID
-    const pairSelector = new PairSelector();
+    const liquidationPlanner = new LiquidationPlanner(config.AAVE_PROTOCOL_DATA_PROVIDER);
     const attemptHistory = new AttemptHistory();
     
     console.log(`[v2] Executor client initialized (address=${executorClient.getAddress()})`);
-    console.log(`[v2] Wallet address: ${executorClient.getWalletAddress()}\n`);
+    console.log(`[v2] Wallet address: ${executorClient.getWalletAddress()}`);
+    console.log(`[v2] Liquidation planner initialized\n`);
 
     // 6. Setup liquidation audit
     console.log('[v2] Phase 6: Setting up liquidation audit');
@@ -160,11 +154,26 @@ async function main() {
             `[execute] Liquidation opportunity: user=${user} HF=${healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)}`
           );
           
-          // Select collateral/debt pair
-          const pair = await pairSelector.selectPair(user, executorClient.getWalletAddress());
+          // Build liquidation plan with correct token units
+          let plan;
+          try {
+            plan = await liquidationPlanner.buildPlan(user);
+          } catch (err) {
+            console.error(
+              `[execute] Failed to build liquidation plan for ${user}:`,
+              err instanceof Error ? err.message : err
+            );
+            attemptHistory.record({
+              user,
+              timestamp: Date.now(),
+              status: 'error',
+              error: err instanceof Error ? err.message : String(err)
+            });
+            return;
+          }
           
-          if (!pair) {
-            console.warn(`[execute] No pair selected for user=${user}`);
+          if (!plan) {
+            console.warn(`[execute] No liquidation plan available for user=${user}`);
             attemptHistory.record({
               user,
               timestamp: Date.now(),
@@ -174,90 +183,56 @@ async function main() {
           }
           
           console.log(
-            `[execute] Pair selected: collateral=${pair.collateralAsset} debt=${pair.debtAsset}`
+            `[execute] Plan: debtAsset=${plan.debtAsset} collateralAsset=${plan.collateralAsset}`
+          );
+          console.log(
+            `[execute] debtToCover=${plan.debtToCover.toString()} (${plan.debtAssetDecimals} decimals)`
+          );
+          console.log(
+            `[execute] expectedCollateralOut=${plan.expectedCollateralOut.toString()} (${plan.collateralAssetDecimals} decimals)`
+          );
+          console.log(
+            `[execute] liquidationBonus=${plan.liquidationBonusBps} BPS (${plan.liquidationBonusBps / 100}%)`
           );
           
           if (!executionEnabled) {
             // DRY RUN mode: log only
-            console.log('[execute] DRY RUN mode - would attempt liquidation with:');
-            console.log(`[execute]   user: ${user}`);
-            console.log(`[execute]   collateral: ${pair.collateralAsset}`);
-            console.log(`[execute]   debt: ${pair.debtAsset}`);
-            console.log(`[execute]   Set EXECUTION_ENABLED=true to enable real execution`);
+            console.log('[execute] DRY RUN mode - would attempt liquidation with plan above');
+            console.log(`[execute] Set EXECUTION_ENABLED=true to enable real execution`);
             
             attemptHistory.record({
               user,
               timestamp: Date.now(),
               status: 'sent',
-              debtAsset: pair.debtAsset,
-              collateralAsset: pair.collateralAsset,
-              debtToCover: '0'
+              debtAsset: plan.debtAsset,
+              collateralAsset: plan.collateralAsset,
+              debtToCover: plan.debtToCover.toString()
             });
             return;
           }
           
           // REAL EXECUTION PATH (guarded by EXECUTION_ENABLED)
           try {
-            // Get user account data to calculate debtToCover
-            const provider = getHttpProvider();
-            const poolContract = new ethers.Contract(
-              config.AAVE_POOL_ADDRESS,
-              ['function getUserAccountData(address user) external view returns (uint256 totalCollateralBase, uint256 totalDebtBase, uint256 availableBorrowsBase, uint256 currentLiquidationThreshold, uint256 ltv, uint256 healthFactor)'],
-              provider
-            );
-            
-            const accountData = await poolContract.getUserAccountData(user);
-            const totalDebtBase = BigInt(accountData.totalDebtBase.toString());
-            
-            // Calculate debtToCover: 50% close factor (fixed)
-            const debtToCover = totalDebtBase / 2n;
-            
-            console.log(`[execute] Calculated debtToCover: ${debtToCover.toString()} (50% of ${totalDebtBase.toString()})`);
-            
-            // Get debt asset reserves to query for debt token info
-            const debtReserveContract = new ethers.Contract(
-              pair.debtAsset,
-              ['function decimals() external view returns (uint8)'],
-              provider
-            );
-            
-            const debtDecimals = await debtReserveContract.decimals();
-            
-            // Convert debtToCover from 1e8 to debt token decimals
-            let debtToCoverNative: bigint;
-            if (debtDecimals === 8) {
-              debtToCoverNative = debtToCover;
-            } else if (debtDecimals < 8) {
-              debtToCoverNative = debtToCover / (10n ** BigInt(8 - debtDecimals));
-            } else {
-              debtToCoverNative = debtToCover * (10n ** BigInt(debtDecimals - 8));
-            }
-            
-            // Get expected collateral with liquidation bonus
-            const expectedCollateralWithBonus = (debtToCoverNative * (10000n + BigInt(LIQUIDATION_BONUS_BPS))) / 10000n;
-            
-            console.log(`[execute] Expected collateral (with ${LIQUIDATION_BONUS_BPS / 100}% bonus): ${expectedCollateralWithBonus.toString()}`);
-            
-            // Build 1inch swap calldata
+            // Build 1inch swap calldata using expected collateral out
             const swapQuote = await oneInchBuilder.getSwapCalldata({
-              fromToken: pair.collateralAsset,
-              toToken: pair.debtAsset,
-              amount: expectedCollateralWithBonus.toString(),
+              fromToken: plan.collateralAsset,
+              toToken: plan.debtAsset,
+              amount: plan.expectedCollateralOut.toString(),
               fromAddress: executorClient.getAddress(),
               slippageBps: SWAP_SLIPPAGE_BPS
             });
             
             console.log(`[execute] 1inch swap quote obtained: minOut=${swapQuote.minOut}`);
             
-            // Execute liquidation
+            // Execute liquidation with correct amounts
             const result = await executorClient.attemptLiquidation({
               user,
-              collateralAsset: pair.collateralAsset,
-              debtAsset: pair.debtAsset,
-              debtToCover: debtToCoverNative,
+              collateralAsset: plan.collateralAsset,
+              debtAsset: plan.debtAsset,
+              debtToCover: plan.debtToCover,
               oneInchCalldata: swapQuote.data,
               minOut: BigInt(swapQuote.minOut),
-              payout: pair.payout
+              payout: executorClient.getWalletAddress()
             });
             
             if (result.success) {
@@ -267,9 +242,9 @@ async function main() {
                 timestamp: Date.now(),
                 status: 'included',
                 txHash: result.txHash,
-                debtAsset: pair.debtAsset,
-                collateralAsset: pair.collateralAsset,
-                debtToCover: debtToCoverNative.toString()
+                debtAsset: plan.debtAsset,
+                collateralAsset: plan.collateralAsset,
+                debtToCover: plan.debtToCover.toString()
               });
             } else {
               console.error(`[execute] ❌ Liquidation failed: ${result.error}`);
@@ -279,9 +254,9 @@ async function main() {
                 status: result.txHash ? 'reverted' : 'error',
                 txHash: result.txHash,
                 error: result.error,
-                debtAsset: pair.debtAsset,
-                collateralAsset: pair.collateralAsset,
-                debtToCover: debtToCoverNative.toString()
+                debtAsset: plan.debtAsset,
+                collateralAsset: plan.collateralAsset,
+                debtToCover: plan.debtToCover.toString()
               });
             }
           } catch (err) {
@@ -292,8 +267,9 @@ async function main() {
               timestamp: Date.now(),
               status: 'error',
               error: errorMsg,
-              debtAsset: pair.debtAsset,
-              collateralAsset: pair.collateralAsset
+              debtAsset: plan.debtAsset,
+              collateralAsset: plan.collateralAsset,
+              debtToCover: plan.debtToCover.toString()
             });
           }
         }

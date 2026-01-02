@@ -69,9 +69,6 @@ export class HealthFactorChecker {
     // Execute multicall
     const results = await this.multicall3.aggregate3.staticCall(calls);
     
-    // Get ETH USD price once for all conversions (1e18 BigInt)
-    const ethUsd1e18 = await getUsdPrice('ETH');
-    
     // Parse results
     const healthFactors: HealthFactorResult[] = [];
     
@@ -93,13 +90,42 @@ export class HealthFactorChecker {
           // Convert HF from ray (18 decimals) to float (for logging only)
           const healthFactor = Number(healthFactorRaw) / 1e18;
           
-          // Calculate debtUsd1e18 from totalDebtBase using priceMath
-          // totalDebtBase is in 1e8 units (Aave base currency)
-          // Step 1: Convert to 1e18 (totalDebtBase is already BigInt from ABI)
-          const totalDebtBase1e18 = totalDebtBase * (10n ** 10n);
+          // Calculate debtUsd1e18 from totalDebtBase correctly based on base currency
+          let debtUsd1e18: bigint;
           
-          // Step 2: Multiply by ETH USD price (both 1e18)
-          const debtUsd1e18 = (totalDebtBase1e18 * ethUsd1e18) / (10n ** 18n);
+          if (config.AAVE_BASE_CURRENCY_IS_USD) {
+            // Base currency is USD: just normalize decimals
+            const baseDecimals = config.AAVE_BASE_CURRENCY_DECIMALS;
+            if (baseDecimals === 18) {
+              debtUsd1e18 = totalDebtBase;
+            } else if (baseDecimals < 18) {
+              const exponent = 18 - baseDecimals;
+              debtUsd1e18 = totalDebtBase * (10n ** BigInt(exponent));
+            } else {
+              const exponent = baseDecimals - 18;
+              debtUsd1e18 = totalDebtBase / (10n ** BigInt(exponent));
+            }
+          } else {
+            // Base currency is ETH (or other): convert via price
+            // Get ETH USD price once for this batch (should be cached from first call)
+            const ethUsd1e18 = await getUsdPrice('ETH');
+            
+            // Normalize totalDebtBase to 1e18
+            const baseDecimals = config.AAVE_BASE_CURRENCY_DECIMALS;
+            let totalDebtBase1e18: bigint;
+            if (baseDecimals === 18) {
+              totalDebtBase1e18 = totalDebtBase;
+            } else if (baseDecimals < 18) {
+              const exponent = 18 - baseDecimals;
+              totalDebtBase1e18 = totalDebtBase * (10n ** BigInt(exponent));
+            } else {
+              const exponent = baseDecimals - 18;
+              totalDebtBase1e18 = totalDebtBase / (10n ** BigInt(exponent));
+            }
+            
+            // Convert to USD
+            debtUsd1e18 = (totalDebtBase1e18 * ethUsd1e18) / (10n ** 18n);
+          }
           
           healthFactors.push({
             address,
