@@ -5,6 +5,7 @@ import { getHttpProvider } from '../providers/rpc.js';
 import { config } from '../config/index.js';
 import type { TelegramNotifier } from '../notify/TelegramNotifier.js';
 import type { AttemptHistory } from '../execution/attemptHistory.js';
+import type { ActiveRiskSet } from '../risk/ActiveRiskSet.js';
 
 /**
  * Audit reason classification
@@ -12,8 +13,8 @@ import type { AttemptHistory } from '../execution/attemptHistory.js';
 export type AuditReason =
   | 'not_in_active_set'
   | 'debt_below_min'
-  | 'hf_never_crossed'
-  | 'tx_reverted_or_not_included';
+  | 'hf_never_crossed_execute'
+  | 'attempt_failed_or_late';
 
 /**
  * Liquidation event data
@@ -35,6 +36,7 @@ export interface LiquidationEvent {
 export class LiquidationAudit {
   private provider: ethers.JsonRpcProvider;
   private poolContract: ethers.Contract;
+  private activeRiskSetRef: ActiveRiskSet;
   private activeRiskSet: Set<string>;
   private attemptHistory: AttemptHistory;
   private notifier: TelegramNotifier;
@@ -42,11 +44,13 @@ export class LiquidationAudit {
 
   constructor(
     activeRiskSet: Set<string>,
+    activeRiskSetRef: ActiveRiskSet,
     attemptHistory: AttemptHistory,
     notifier: TelegramNotifier
   ) {
     this.provider = getHttpProvider();
     this.activeRiskSet = activeRiskSet;
+    this.activeRiskSetRef = activeRiskSetRef;
     this.attemptHistory = attemptHistory;
     this.notifier = notifier;
 
@@ -73,8 +77,10 @@ export class LiquidationAudit {
       debtToCover: bigint,
       liquidatedCollateralAmount: bigint,
       liquidator: string,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       receiveAToken: boolean,
-      event: ethers.EventLog
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      event: any
     ) => {
       const liquidationEvent: LiquidationEvent = {
         user: user.toLowerCase(),
@@ -111,7 +117,7 @@ export class LiquidationAudit {
    * Handle a liquidation event
    */
   private async handleLiquidation(event: LiquidationEvent): Promise<void> {
-    const { user, collateralAsset, debtAsset, debtToCover, liquidator, blockNumber, txHash } = event;
+    const { user } = event;
 
     // Check if user was in active risk set
     const inActiveSet = this.activeRiskSet.has(user);
@@ -122,30 +128,32 @@ export class LiquidationAudit {
       return;
     }
 
-    // User was in active set - classify why we didn't liquidate
-    const lastAttempt = this.attemptHistory.getLastAttempt(user);
+    // User was in active set - get their last known data
+    const userData = this.activeRiskSetRef.get(user);
+    const lastHF = userData?.healthFactor || null;
+    const lastDebtUsd1e18 = userData?.lastDebtUsd1e18 || null;
     
-    // Calculate debt USD (note: simplified calculation, production should use price feeds)
-    // For now, estimate based on totalDebtBase in ETH terms
-    const debtUsd = Number(debtToCover) / 1e18 * 3000; // Rough approximation
-    // TODO: Integrate with priceMath for accurate USD values
+    // Convert debtUsd1e18 to display number
+    const lastDebtUsd = lastDebtUsd1e18 ? Number(lastDebtUsd1e18) / 1e18 : null;
     
     // Check if debt was below minimum
-    if (debtUsd > 0 && debtUsd < config.MIN_DEBT_USD) {
-      await this.sendAuditNotification(event, 'debt_below_min', debtUsd, null, lastAttempt?.status || null);
+    const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
+    if (lastDebtUsd1e18 !== null && lastDebtUsd1e18 < minDebtUsd1e18) {
+      await this.sendAuditNotification(event, 'debt_below_min', lastDebtUsd, lastHF, null);
       return;
     }
 
     // Check if we attempted but failed
+    const lastAttempt = this.attemptHistory.getLastAttempt(user);
     if (lastAttempt) {
       if (lastAttempt.status === 'sent' || lastAttempt.status === 'reverted' || lastAttempt.status === 'error') {
-        await this.sendAuditNotification(event, 'tx_reverted_or_not_included', debtUsd, null, lastAttempt.status);
+        await this.sendAuditNotification(event, 'attempt_failed_or_late', lastDebtUsd, lastHF, lastAttempt.status);
         return;
       }
     }
 
     // Default: HF never crossed execute threshold
-    await this.sendAuditNotification(event, 'hf_never_crossed', debtUsd, null, null);
+    await this.sendAuditNotification(event, 'hf_never_crossed_execute', lastDebtUsd, lastHF, null);
   }
 
   /**
@@ -189,12 +197,12 @@ export class LiquidationAudit {
         reasonText = '❌ User not in active risk set';
         break;
       case 'debt_below_min':
-        reasonText = `💰 Debt below MIN_DEBT_USD (${config.MIN_DEBT_USD})`;
+        reasonText = `💰 Debt below MIN_DEBT_USD ($${config.MIN_DEBT_USD})`;
         break;
-      case 'hf_never_crossed':
-        reasonText = '📊 HF never crossed execute threshold';
+      case 'hf_never_crossed_execute':
+        reasonText = `📊 HF never crossed execute threshold (${config.HF_THRESHOLD_EXECUTE})`;
         break;
-      case 'tx_reverted_or_not_included':
+      case 'attempt_failed_or_late':
         reasonText = `🔄 We attempted but ${attemptStatus || 'failed'}`;
         break;
     }

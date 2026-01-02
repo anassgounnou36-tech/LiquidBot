@@ -9,12 +9,16 @@ import { config } from './config/index.js';
 import { DirtyQueue } from './realtime/dirtyQueue.js';
 import { AavePoolListeners } from './realtime/aavePoolListeners.js';
 import { VerifierLoop } from './risk/verifierLoop.js';
-import { PairSelector } from './risk/pairSelector.js';
 import { ExecutorClient } from './execution/executorClient.js';
 import { OneInchSwapBuilder } from './execution/oneInch.js';
 import { AttemptHistory } from './execution/attemptHistory.js';
 import { LiquidationAudit } from './audit/liquidationAudit.js';
-import { initChainlinkFeeds, initPythFeeds } from './prices/priceMath.js';
+import { initChainlinkFeeds } from './prices/priceMath.js';
+import { LiquidationPlanner } from './execution/liquidationPlanner.js';
+
+// 1inch swap slippage tolerance
+// Should be adjusted based on market conditions and token pair liquidity
+const SWAP_SLIPPAGE_BPS = 100; // 1% = 100 basis points
 
 /**
  * Main application entry point
@@ -54,12 +58,13 @@ async function main() {
     // Update risk set with fresh HFs
     let atRiskCount = 0;
     for (const result of results) {
-      riskSet.updateHF(result.address, result.healthFactor);
+      riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18);
       
       if (result.healthFactor < config.HF_THRESHOLD_START) {
         atRiskCount++;
+        const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;
         console.log(
-          `[v2] At-risk user: ${result.address} HF=${result.healthFactor.toFixed(4)}`
+          `[v2] At-risk user: ${result.address} HF=${result.healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)}`
         );
       }
     }
@@ -68,6 +73,11 @@ async function main() {
 
     // 3. Setup price service (Chainlink OCR2 + Pyth) with priceMath
     console.log('[v2] Phase 3: Setting up price oracles');
+    
+    // Pyth is disabled in this version (Option B)
+    console.log('[v2] ⚠️  Pyth price feeds are DISABLED in this version');
+    console.log('[v2] Using Chainlink feeds only for price data');
+    
     const priceService = new PriceService();
     
     // Initialize priceMath with Chainlink feeds
@@ -80,12 +90,9 @@ async function main() {
       }
     }
     
-    // Initialize priceMath with Pyth feeds
-    if (config.PYTH_FEED_IDS_JSON) {
-      initPythFeeds(config.PYTH_FEED_IDS_JSON);
-    }
+    // Do NOT initialize Pyth feeds - disabled
     
-    console.log('[v2] Price service configured\n');
+    console.log('[v2] Price service configured (Chainlink only)\n');
 
     // 4. Setup realtime triggers and dirty queue
     console.log('[v2] Phase 4: Setting up realtime triggers');
@@ -110,16 +117,18 @@ async function main() {
       config.EXECUTION_PRIVATE_KEY
     );
     const oneInchBuilder = new OneInchSwapBuilder(8453); // Base chain ID
-    const pairSelector = new PairSelector();
+    const liquidationPlanner = new LiquidationPlanner(config.AAVE_PROTOCOL_DATA_PROVIDER);
     const attemptHistory = new AttemptHistory();
     
     console.log(`[v2] Executor client initialized (address=${executorClient.getAddress()})`);
-    console.log(`[v2] Wallet address: ${executorClient.getWalletAddress()}\n`);
+    console.log(`[v2] Wallet address: ${executorClient.getWalletAddress()}`);
+    console.log(`[v2] Liquidation planner initialized\n`);
 
     // 6. Setup liquidation audit
     console.log('[v2] Phase 6: Setting up liquidation audit');
     const liquidationAudit = new LiquidationAudit(
       activeRiskSetSet,
+      riskSet,
       attemptHistory,
       notifier
     );
@@ -129,6 +138,9 @@ async function main() {
     // 7. Start verifier loop with execution callback
     console.log('[v2] Phase 7: Starting verifier loop');
     
+    const executionEnabled = config.EXECUTION_ENABLED;
+    console.log(`[v2] Execution mode: ${executionEnabled ? 'ENABLED ⚠️' : 'DRY RUN (safe)'}`);
+    
     const verifierLoop = new VerifierLoop(
       dirtyQueue,
       hfChecker,
@@ -136,16 +148,32 @@ async function main() {
       {
         intervalMs: 250,
         batchSize: 200,
-        onExecute: async (user: string, healthFactor: number, debtUsd: number) => {
+        onExecute: async (user: string, healthFactor: number, debtUsd1e18: bigint) => {
+          const debtUsdDisplay = Number(debtUsd1e18) / 1e18;
           console.log(
-            `[execute] Attempting liquidation for user=${user} HF=${healthFactor.toFixed(4)} debtUsd=$${debtUsd.toFixed(2)}`
+            `[execute] Liquidation opportunity: user=${user} HF=${healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)}`
           );
           
-          // Select collateral/debt pair
-          const pair = await pairSelector.selectPair(user, executorClient.getWalletAddress());
+          // Build liquidation plan with correct token units
+          let plan;
+          try {
+            plan = await liquidationPlanner.buildPlan(user);
+          } catch (err) {
+            console.error(
+              `[execute] Failed to build liquidation plan for ${user}:`,
+              err instanceof Error ? err.message : err
+            );
+            attemptHistory.record({
+              user,
+              timestamp: Date.now(),
+              status: 'error',
+              error: err instanceof Error ? err.message : String(err)
+            });
+            return;
+          }
           
-          if (!pair) {
-            console.warn(`[execute] No pair selected for user=${user}`);
+          if (!plan) {
+            console.warn(`[execute] No liquidation plan available for user=${user}`);
             attemptHistory.record({
               user,
               timestamp: Date.now(),
@@ -155,59 +183,95 @@ async function main() {
           }
           
           console.log(
-            `[execute] Pair selected: collateral=${pair.collateralAsset} debt=${pair.debtAsset}`
+            `[execute] Plan: debtAsset=${plan.debtAsset} collateralAsset=${plan.collateralAsset}`
+          );
+          console.log(
+            `[execute] debtToCover=${plan.debtToCover.toString()} (${plan.debtAssetDecimals} decimals)`
+          );
+          console.log(
+            `[execute] expectedCollateralOut=${plan.expectedCollateralOut.toString()} (${plan.collateralAssetDecimals} decimals)`
+          );
+          console.log(
+            `[execute] liquidationBonus=${plan.liquidationBonusBps} BPS (${plan.liquidationBonusBps / 100}%)`
           );
           
-          // Note: Full execution path would require:
-          // 1. Calculate debtToCover based on user debt and close factor
-          // 2. Calculate expected collateral with liquidation bonus
-          // 3. Get 1inch swap quote for collateral -> debt swap
-          // 4. Call executorClient.attemptLiquidation() with params
-          // 
-          // For now, we log the attempt without executing (dev mode)
-          // Set EXECUTION_ENABLED=false in .env to safely run without execution
+          if (!executionEnabled) {
+            // DRY RUN mode: log only
+            console.log('[execute] DRY RUN mode - would attempt liquidation with plan above');
+            console.log(`[execute] Set EXECUTION_ENABLED=true to enable real execution`);
+            
+            attemptHistory.record({
+              user,
+              timestamp: Date.now(),
+              status: 'sent',
+              debtAsset: plan.debtAsset,
+              collateralAsset: plan.collateralAsset,
+              debtToCover: plan.debtToCover.toString()
+            });
+            return;
+          }
           
-          attemptHistory.record({
-            user,
-            timestamp: Date.now(),
-            status: 'sent',
-            debtAsset: pair.debtAsset,
-            collateralAsset: pair.collateralAsset,
-            debtToCover: '0' // Would be calculated in full implementation
-          });
-          
-          // Example of full execution (commented out for safety):
-          /*
-          const debtToCover = BigInt('1000000'); // Calculate based on user debt
-          const expectedCollateral = BigInt('1100000'); // Calculate with bonus
-          
-          const swapQuote = await oneInchBuilder.getSwapCalldata({
-            fromToken: pair.collateralAsset,
-            toToken: pair.debtAsset,
-            amount: expectedCollateral.toString(),
-            fromAddress: executorClient.getAddress()
-          });
-          
-          const result = await executorClient.attemptLiquidation({
-            user,
-            collateralAsset: pair.collateralAsset,
-            debtAsset: pair.debtAsset,
-            debtToCover,
-            oneInchCalldata: swapQuote.data,
-            minOut: BigInt(swapQuote.minOut),
-            payout: pair.payout
-          });
-          
-          attemptHistory.record({
-            user,
-            timestamp: Date.now(),
-            status: result.success ? 'included' : 'reverted',
-            txHash: result.txHash,
-            debtAsset: pair.debtAsset,
-            collateralAsset: pair.collateralAsset,
-            debtToCover: debtToCover.toString()
-          });
-          */
+          // REAL EXECUTION PATH (guarded by EXECUTION_ENABLED)
+          try {
+            // Build 1inch swap calldata using expected collateral out
+            const swapQuote = await oneInchBuilder.getSwapCalldata({
+              fromToken: plan.collateralAsset,
+              toToken: plan.debtAsset,
+              amount: plan.expectedCollateralOut.toString(),
+              fromAddress: executorClient.getAddress(),
+              slippageBps: SWAP_SLIPPAGE_BPS
+            });
+            
+            console.log(`[execute] 1inch swap quote obtained: minOut=${swapQuote.minOut}`);
+            
+            // Execute liquidation with correct amounts
+            const result = await executorClient.attemptLiquidation({
+              user,
+              collateralAsset: plan.collateralAsset,
+              debtAsset: plan.debtAsset,
+              debtToCover: plan.debtToCover,
+              oneInchCalldata: swapQuote.data,
+              minOut: BigInt(swapQuote.minOut),
+              payout: executorClient.getWalletAddress()
+            });
+            
+            if (result.success) {
+              console.log(`[execute] ✅ Liquidation successful! txHash=${result.txHash}`);
+              attemptHistory.record({
+                user,
+                timestamp: Date.now(),
+                status: 'included',
+                txHash: result.txHash,
+                debtAsset: plan.debtAsset,
+                collateralAsset: plan.collateralAsset,
+                debtToCover: plan.debtToCover.toString()
+              });
+            } else {
+              console.error(`[execute] ❌ Liquidation failed: ${result.error}`);
+              attemptHistory.record({
+                user,
+                timestamp: Date.now(),
+                status: result.txHash ? 'reverted' : 'error',
+                txHash: result.txHash,
+                error: result.error,
+                debtAsset: plan.debtAsset,
+                collateralAsset: plan.collateralAsset,
+                debtToCover: plan.debtToCover.toString()
+              });
+            }
+          } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            console.error(`[execute] ❌ Exception during liquidation: ${errorMsg}`);
+            attemptHistory.record({
+              user,
+              timestamp: Date.now(),
+              status: 'error',
+              error: errorMsg,
+              debtAsset: plan.debtAsset,
+              collateralAsset: plan.collateralAsset,
+              debtToCover: plan.debtToCover.toString()
+            });
+          }
         }
       }
     );

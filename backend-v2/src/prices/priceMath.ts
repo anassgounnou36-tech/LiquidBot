@@ -1,7 +1,6 @@
 // priceMath.ts: Pricing math layer with 1e18 BigInt normalization (zero floating point)
 
 import { ethers } from 'ethers';
-import { config } from '../config/index.js';
 import { getHttpProvider } from '../providers/rpc.js';
 
 /**
@@ -26,11 +25,20 @@ const pythFeedIds = new Map<string, string>();
 
 /**
  * Initialize Chainlink feed addresses from config
+ * Implements ETH→WETH aliasing for Base network
  */
 export function initChainlinkFeeds(feeds: Record<string, string>): void {
   for (const [symbol, address] of Object.entries(feeds)) {
     chainlinkFeedAddresses.set(symbol.toUpperCase(), address);
   }
+  
+  // ETH→WETH aliasing: if WETH feed exists but ETH doesn't, alias ETH to WETH
+  if (chainlinkFeedAddresses.has('WETH') && !chainlinkFeedAddresses.has('ETH')) {
+    const wethAddress = chainlinkFeedAddresses.get('WETH')!;
+    chainlinkFeedAddresses.set('ETH', wethAddress);
+    console.log(`[priceMath] Aliased ETH → WETH (${wethAddress})`);
+  }
+  
   console.log(`[priceMath] Initialized ${chainlinkFeedAddresses.size} Chainlink feeds`);
 }
 
@@ -84,14 +92,16 @@ async function fetchChainlinkPrice(symbol: string): Promise<bigint> {
   const [, answer] = await feedContract.latestRoundData();
   const decimals = await getChainlinkDecimals(feedAddress);
 
-  // Normalize to 1e18
+  // Normalize to 1e18 using pure BigInt exponentiation
   const price = BigInt(answer.toString());
   if (decimals === 18) {
     return price;
   } else if (decimals < 18) {
-    return price * BigInt(10 ** (18 - decimals));
+    const exponent = 18 - decimals;
+    return price * (10n ** BigInt(exponent));
   } else {
-    return price / BigInt(10 ** (decimals - 18));
+    const exponent = decimals - 18;
+    return price / (10n ** BigInt(exponent));
   }
 }
 
@@ -127,12 +137,14 @@ async function fetchRatioFeedPrice(symbol: string): Promise<bigint> {
   const [, ratioAnswer] = await ratioFeedContract.latestRoundData();
   const ratioDecimals = await getChainlinkDecimals(ethRatioFeedAddress);
 
-  // Normalize ratio to 1e18
+  // Normalize ratio to 1e18 using pure BigInt exponentiation
   let ratio = BigInt(ratioAnswer.toString());
   if (ratioDecimals < 18) {
-    ratio = ratio * BigInt(10 ** (18 - ratioDecimals));
+    const exponent = 18 - ratioDecimals;
+    ratio = ratio * (10n ** BigInt(exponent));
   } else if (ratioDecimals > 18) {
-    ratio = ratio / BigInt(10 ** (ratioDecimals - 18));
+    const exponent = ratioDecimals - 18;
+    ratio = ratio / (10n ** BigInt(exponent));
   }
 
   // Compose: ratio × ethUsdPrice (both 1e18)
@@ -151,6 +163,7 @@ async function fetchRatioFeedPrice(symbol: string): Promise<bigint> {
  * 
  * For now, Pyth support is configured but not fully implemented.
  */
+/* eslint-disable @typescript-eslint/no-unused-vars */
 async function fetchPythPrice(symbol: string): Promise<bigint> {
   const feedId = pythFeedIds.get(symbol);
   if (!feedId) {
@@ -166,10 +179,12 @@ async function fetchPythPrice(symbol: string): Promise<bigint> {
   // 5. Normalize to 1e18
   throw new Error(`Pyth price fetching not yet implemented for ${symbol}. Use Chainlink feeds instead.`);
 }
+/* eslint-enable @typescript-eslint/no-unused-vars */
 
 /**
  * Get USD price for a symbol (normalized to 1e18 BigInt)
- * Supports Chainlink direct feeds, ratio feeds, and Pyth feeds
+ * Supports Chainlink direct feeds and ratio feeds
+ * NOTE: Pyth is disabled in this version - use Chainlink feeds only
  */
 export async function getUsdPrice(symbol: string): Promise<bigint> {
   const normalizedSymbol = symbol.toUpperCase();
@@ -193,13 +208,9 @@ export async function getUsdPrice(symbol: string): Promise<bigint> {
   else if (chainlinkFeedAddresses.has(`${normalizedSymbol}_ETH`)) {
     price = await fetchRatioFeedPrice(normalizedSymbol);
   }
-  // Try Pyth feed
-  else if (pythFeedIds.has(normalizedSymbol)) {
-    price = await fetchPythPrice(normalizedSymbol);
-  }
-  // Not found
+  // Pyth is disabled - not supported in this version
   else {
-    throw new Error(`No price feed configured for ${normalizedSymbol}`);
+    throw new Error(`No Chainlink price feed configured for ${normalizedSymbol}. Pyth is disabled in this version.`);
   }
 
   // Cache the price
@@ -228,14 +239,16 @@ export function calculateUsdValue(
   decimals: number,
   priceUsd1e18: bigint
 ): number {
-  // Normalize rawAmount to 1e18
+  // Normalize rawAmount to 1e18 using pure BigInt exponentiation
   let amount1e18: bigint;
   if (decimals === 18) {
     amount1e18 = rawAmount;
   } else if (decimals < 18) {
-    amount1e18 = rawAmount * BigInt(10 ** (18 - decimals));
+    const exponent = 18 - decimals;
+    amount1e18 = rawAmount * (10n ** BigInt(exponent));
   } else {
-    amount1e18 = rawAmount / BigInt(10 ** (decimals - 18));
+    const exponent = decimals - 18;
+    amount1e18 = rawAmount / (10n ** BigInt(exponent));
   }
 
   // Multiply by price and divide by 1e18

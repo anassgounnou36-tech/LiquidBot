@@ -3,6 +3,7 @@
 import { Contract, Interface } from 'ethers';
 import { getHttpProvider } from '../providers/rpc.js';
 import { config } from '../config/index.js';
+import { getUsdPrice } from '../prices/priceMath.js';
 
 const MULTICALL3_ABI = [
   'function aggregate3(tuple(address target, bool allowFailure, bytes callData)[] calls) external payable returns (tuple(bool success, bytes returnData)[] returnData)'
@@ -20,7 +21,7 @@ export interface HealthFactorResult {
   healthFactor: number;
   totalDebtBase: bigint;
   totalCollateralBase: bigint;
-  debtUsd: number;
+  debtUsd1e18: bigint;
 }
 
 /**
@@ -86,21 +87,52 @@ export class HealthFactorChecker {
           const totalDebtBase = decoded[1];
           const healthFactorRaw = decoded[5];
           
-          // Convert HF from ray (18 decimals) to float
+          // Convert HF from ray (18 decimals) to float (for logging only)
           const healthFactor = Number(healthFactorRaw) / 1e18;
           
-          // Calculate debtUsd from totalDebtBase (in ETH terms)
-          // totalDebtBase is denominated in the base currency (ETH on Base)
-          // We'll approximate using a rough ETH price - this should be replaced with actual price feed
-          // Note: For production, integrate with priceMath.getUsdPrice('ETH')
-          const debtUsd = Number(totalDebtBase) / 1e18 * 3000; // Approximate ETH price
+          // Calculate debtUsd1e18 from totalDebtBase correctly based on base currency
+          let debtUsd1e18: bigint;
+          
+          if (config.AAVE_BASE_CURRENCY_IS_USD) {
+            // Base currency is USD: just normalize decimals
+            const baseDecimals = config.AAVE_BASE_CURRENCY_DECIMALS;
+            if (baseDecimals === 18) {
+              debtUsd1e18 = totalDebtBase;
+            } else if (baseDecimals < 18) {
+              const exponent = 18 - baseDecimals;
+              debtUsd1e18 = totalDebtBase * (10n ** BigInt(exponent));
+            } else {
+              const exponent = baseDecimals - 18;
+              debtUsd1e18 = totalDebtBase / (10n ** BigInt(exponent));
+            }
+          } else {
+            // Base currency is ETH (or other): convert via price
+            // Get ETH USD price once for this batch (should be cached from first call)
+            const ethUsd1e18 = await getUsdPrice('ETH');
+            
+            // Normalize totalDebtBase to 1e18
+            const baseDecimals = config.AAVE_BASE_CURRENCY_DECIMALS;
+            let totalDebtBase1e18: bigint;
+            if (baseDecimals === 18) {
+              totalDebtBase1e18 = totalDebtBase;
+            } else if (baseDecimals < 18) {
+              const exponent = 18 - baseDecimals;
+              totalDebtBase1e18 = totalDebtBase * (10n ** BigInt(exponent));
+            } else {
+              const exponent = baseDecimals - 18;
+              totalDebtBase1e18 = totalDebtBase / (10n ** BigInt(exponent));
+            }
+            
+            // Convert to USD
+            debtUsd1e18 = (totalDebtBase1e18 * ethUsd1e18) / (10n ** 18n);
+          }
           
           healthFactors.push({
             address,
             healthFactor,
             totalDebtBase,
             totalCollateralBase,
-            debtUsd
+            debtUsd1e18
           });
         } catch (err) {
           console.warn(`[hf-checker] Failed to decode result for ${address}:`, err);
