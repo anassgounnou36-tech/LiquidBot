@@ -2,24 +2,26 @@
 
 import { ActiveRiskSet } from '../risk/ActiveRiskSet.js';
 import { HealthFactorChecker } from '../risk/HealthFactorChecker.js';
-import { PriceService } from '../prices/PriceService.js';
+import { ChainlinkListener } from '../prices/ChainlinkListener.js';
 import { getWsProvider } from '../providers/ws.js';
 import { config } from '../config/index.js';
+import { updateCachedPrice } from '../prices/priceMath.js';
 
 /**
  * RealtimeOrchestrator: Wire up block listener → HF checks → price triggers
  * PR1 scope: Basic foundation only, no execution path
+ * NOTE: Currently not used in favor of DirtyQueue + VerifierLoop architecture
  */
 export class RealtimeOrchestrator {
   private riskSet: ActiveRiskSet;
   private hfChecker: HealthFactorChecker;
-  private priceService: PriceService;
+  private chainlinkListener: ChainlinkListener;
   private isRunning = false;
 
-  constructor(riskSet: ActiveRiskSet, priceService: PriceService) {
+  constructor(riskSet: ActiveRiskSet, chainlinkListener: ChainlinkListener) {
     this.riskSet = riskSet;
     this.hfChecker = new HealthFactorChecker();
-    this.priceService = priceService;
+    this.chainlinkListener = chainlinkListener;
   }
 
   /**
@@ -34,12 +36,23 @@ export class RealtimeOrchestrator {
     console.log('[realtime] Starting orchestrator');
     this.isRunning = true;
 
-    // Start price listeners
-    await this.priceService.start();
+    // Start Chainlink listener
+    await this.chainlinkListener.start();
 
     // Subscribe to price updates
-    this.priceService.onPriceUpdate((update) => {
-      this.handlePriceUpdate(update).catch(err => {
+    this.chainlinkListener.onPriceUpdate((update) => {
+      // Chainlink uses 8 decimals, normalize to 1e18
+      const decimals = 8;
+      const exponent = 18 - decimals;
+      const price1e18 = update.answer * (10n ** BigInt(exponent));
+      
+      updateCachedPrice(update.symbol, price1e18);
+      
+      this.handlePriceUpdate({
+        symbol: update.symbol,
+        price: Number(price1e18) / 1e18,
+        source: 'chainlink'
+      }).catch(err => {
         console.error('[realtime] Error handling price update:', err);
       });
     });
@@ -62,7 +75,7 @@ export class RealtimeOrchestrator {
     console.log('[realtime] Stopping orchestrator');
     this.isRunning = false;
 
-    await this.priceService.stop();
+    await this.chainlinkListener.stop();
 
     const provider = getWsProvider();
     provider.removeAllListeners();

@@ -24,6 +24,17 @@ const chainlinkFeedAddresses = new Map<string, string>();
 const pythFeedIds = new Map<string, string>();
 
 /**
+ * Address to symbol mapping (lowercase address -> uppercase symbol)
+ * Built at startup from ProtocolDataProvider.getAllReservesTokens()
+ */
+const addressToSymbolMap = new Map<string, string>();
+
+/**
+ * Token decimals cache (lowercase address -> decimals)
+ */
+const tokenDecimalsCache = new Map<string, number>();
+
+/**
  * Initialize Chainlink feed addresses from config
  * Implements ETH→WETH aliasing for Base network
  */
@@ -50,6 +61,56 @@ export function initPythFeeds(feeds: Record<string, string>): void {
     pythFeedIds.set(symbol.toUpperCase(), feedId);
   }
   console.log(`[priceMath] Initialized ${pythFeedIds.size} Pyth feeds`);
+}
+
+/**
+ * Build address→symbol mapping from reserve tokens
+ * Called at startup with results from ProtocolDataProvider.getAllReservesTokens()
+ */
+export function initAddressToSymbolMapping(
+  reserves: Array<{ symbol: string; tokenAddress: string }>
+): void {
+  addressToSymbolMap.clear();
+  
+  for (const reserve of reserves) {
+    const normalizedAddress = reserve.tokenAddress.toLowerCase();
+    const normalizedSymbol = reserve.symbol.toUpperCase();
+    addressToSymbolMap.set(normalizedAddress, normalizedSymbol);
+  }
+  
+  console.log(`[priceMath] Built address→symbol mapping for ${addressToSymbolMap.size} reserves`);
+}
+
+/**
+ * Cache token decimals for an address
+ */
+export function cacheTokenDecimals(address: string, decimals: number): void {
+  tokenDecimalsCache.set(address.toLowerCase(), decimals);
+}
+
+/**
+ * Get cached token decimals for an address
+ */
+export async function getTokenDecimals(address: string): Promise<number> {
+  const normalizedAddress = address.toLowerCase();
+  
+  // Check cache first
+  if (tokenDecimalsCache.has(normalizedAddress)) {
+    return tokenDecimalsCache.get(normalizedAddress)!;
+  }
+  
+  // Fetch from contract
+  const provider = getHttpProvider();
+  const tokenContract = new ethers.Contract(
+    address,
+    ['function decimals() external view returns (uint8)'],
+    provider
+  );
+  
+  const decimals = Number(await tokenContract.decimals());
+  tokenDecimalsCache.set(normalizedAddress, decimals);
+  
+  return decimals;
 }
 
 /**
@@ -217,6 +278,25 @@ export async function getUsdPrice(symbol: string): Promise<bigint> {
   priceCache.set(normalizedSymbol, { price, timestamp: now });
 
   return price;
+}
+
+/**
+ * Get USD price for a token address (normalized to 1e18 BigInt)
+ * Resolves address→symbol via mapping, then fetches price
+ * Supports Chainlink direct feeds and ratio feeds
+ */
+export async function getUsdPriceForAddress(address: string): Promise<bigint> {
+  const normalizedAddress = address.toLowerCase();
+  
+  // Resolve address to symbol
+  const symbol = addressToSymbolMap.get(normalizedAddress);
+  
+  if (!symbol) {
+    throw new Error(`No symbol mapping found for address ${address}. Call initAddressToSymbolMapping() at startup.`);
+  }
+  
+  // Fetch price using symbol
+  return getUsdPrice(symbol);
 }
 
 /**
