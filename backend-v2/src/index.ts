@@ -154,21 +154,60 @@ async function main() {
             return;
           }
           
-          // Get 1inch swap calldata
-          // Note: Need to calculate expected collateral amount first
-          // For now, skip actual execution if not properly configured
           console.log(
             `[execute] Pair selected: collateral=${pair.collateralAsset} debt=${pair.debtAsset}`
           );
           
-          // Record attempt (simplified - full implementation would call executorClient)
+          // Note: Full execution path would require:
+          // 1. Calculate debtToCover based on user debt and close factor
+          // 2. Calculate expected collateral with liquidation bonus
+          // 3. Get 1inch swap quote for collateral -> debt swap
+          // 4. Call executorClient.attemptLiquidation() with params
+          // 
+          // For now, we log the attempt without executing (dev mode)
+          // Set EXECUTION_ENABLED=false in .env to safely run without execution
+          
           attemptHistory.record({
             user,
             timestamp: Date.now(),
             status: 'sent',
             debtAsset: pair.debtAsset,
-            collateralAsset: pair.collateralAsset
+            collateralAsset: pair.collateralAsset,
+            debtToCover: '0' // Would be calculated in full implementation
           });
+          
+          // Example of full execution (commented out for safety):
+          /*
+          const debtToCover = BigInt('1000000'); // Calculate based on user debt
+          const expectedCollateral = BigInt('1100000'); // Calculate with bonus
+          
+          const swapQuote = await oneInchBuilder.getSwapCalldata({
+            fromToken: pair.collateralAsset,
+            toToken: pair.debtAsset,
+            amount: expectedCollateral.toString(),
+            fromAddress: executorClient.getAddress()
+          });
+          
+          const result = await executorClient.attemptLiquidation({
+            user,
+            collateralAsset: pair.collateralAsset,
+            debtAsset: pair.debtAsset,
+            debtToCover,
+            oneInchCalldata: swapQuote.data,
+            minOut: BigInt(swapQuote.minOut),
+            payout: pair.payout
+          });
+          
+          attemptHistory.record({
+            user,
+            timestamp: Date.now(),
+            status: result.success ? 'included' : 'reverted',
+            txHash: result.txHash,
+            debtAsset: pair.debtAsset,
+            collateralAsset: pair.collateralAsset,
+            debtToCover: debtToCover.toString()
+          });
+          */
         }
       }
     );

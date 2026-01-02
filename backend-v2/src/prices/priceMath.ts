@@ -142,6 +142,14 @@ async function fetchRatioFeedPrice(symbol: string): Promise<bigint> {
 /**
  * Fetch Pyth price and normalize to 1e18 BigInt
  * Applies expo and checks staleness via publishTime
+ * 
+ * NOTE: This is a placeholder implementation. Full Pyth integration requires:
+ * 1. Pyth contract address configuration
+ * 2. Contract ABI for price queries
+ * 3. Proper staleness checking via publishTime
+ * 4. Expo application for normalization
+ * 
+ * For now, Pyth support is configured but not fully implemented.
  */
 async function fetchPythPrice(symbol: string): Promise<bigint> {
   const feedId = pythFeedIds.get(symbol);
@@ -149,9 +157,14 @@ async function fetchPythPrice(symbol: string): Promise<bigint> {
     throw new Error(`No Pyth feed ID configured for ${symbol}`);
   }
 
-  // Note: In a real implementation, this would query the Pyth contract
-  // For now, we'll throw an error to indicate Pyth integration is needed
-  throw new Error(`Pyth price fetching not yet implemented for ${symbol}`);
+  // Placeholder: Pyth integration not yet implemented
+  // To implement:
+  // 1. Query Pyth contract at configured address
+  // 2. Call getPriceUnsafe(bytes32 id) or similar
+  // 3. Apply expo normalization: price * 10^expo
+  // 4. Check publishTime for staleness
+  // 5. Normalize to 1e18
+  throw new Error(`Pyth price fetching not yet implemented for ${symbol}. Use Chainlink feeds instead.`);
 }
 
 /**

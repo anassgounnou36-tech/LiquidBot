@@ -89,9 +89,11 @@ export class HealthFactorChecker {
           // Convert HF from ray (18 decimals) to float
           const healthFactor = Number(healthFactorRaw) / 1e18;
           
-          // Estimate debtUsd (totalDebtBase is in ETH terms, approximate to USD)
-          // Note: This is a rough estimate; proper implementation would need ETH/USD price
-          const debtUsd = Number(totalDebtBase) / 1e18 * 3000; // Rough ETH price approximation
+          // Calculate debtUsd from totalDebtBase (in ETH terms)
+          // totalDebtBase is denominated in the base currency (ETH on Base)
+          // We'll approximate using a rough ETH price - this should be replaced with actual price feed
+          // Note: For production, integrate with priceMath.getUsdPrice('ETH')
+          const debtUsd = Number(totalDebtBase) / 1e18 * 3000; // Approximate ETH price
           
           healthFactors.push({
             address,

@@ -125,8 +125,10 @@ export class LiquidationAudit {
     // User was in active set - classify why we didn't liquidate
     const lastAttempt = this.attemptHistory.getLastAttempt(user);
     
-    // Calculate debt USD (simplified - would need price service)
-    const debtUsd = 0; // Placeholder - need price service integration
+    // Calculate debt USD (note: simplified calculation, production should use price feeds)
+    // For now, estimate based on totalDebtBase in ETH terms
+    const debtUsd = Number(debtToCover) / 1e18 * 3000; // Rough approximation
+    // TODO: Integrate with priceMath for accurate USD values
     
     // Check if debt was below minimum
     if (debtUsd > 0 && debtUsd < config.MIN_DEBT_USD) {
