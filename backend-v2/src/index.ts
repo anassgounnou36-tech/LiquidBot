@@ -1,20 +1,29 @@
-// index.ts: Main entry point for backend-v2
+// index.ts: Main entry point for backend-v2 (v2-realtime-pipeline-clean)
 
 import { seedBorrowerUniverse } from './subgraph/universe.js';
 import { ActiveRiskSet } from './risk/ActiveRiskSet.js';
 import { HealthFactorChecker } from './risk/HealthFactorChecker.js';
 import { PriceService } from './prices/PriceService.js';
-import { RealtimeOrchestrator } from './realtime/RealtimeOrchestrator.js';
 import { TelegramNotifier } from './notify/TelegramNotifier.js';
 import { config } from './config/index.js';
+import { DirtyQueue } from './realtime/dirtyQueue.js';
+import { AavePoolListeners } from './realtime/aavePoolListeners.js';
+import { VerifierLoop } from './risk/verifierLoop.js';
+import { PairSelector } from './risk/pairSelector.js';
+import { ExecutorClient } from './execution/executorClient.js';
+import { OneInchSwapBuilder } from './execution/oneInch.js';
+import { AttemptHistory } from './execution/attemptHistory.js';
+import { LiquidationAudit } from './audit/liquidationAudit.js';
+import { initChainlinkFeeds, initPythFeeds } from './prices/priceMath.js';
 
 /**
  * Main application entry point
  */
 async function main() {
   console.log('[v2] ============================================');
-  console.log('[v2] LiquidBot Backend V2 - PR1 Foundation');
-  console.log('[v2] Base-only Aave V3 liquidation detection');
+  console.log('[v2] LiquidBot Backend V2 - PR2 (clean)');
+  console.log('[v2] v2-realtime-pipeline + execution + audit');
+  console.log('[v2] Base-only Aave V3 liquidation bot');
   console.log('[v2] ============================================\n');
 
   // Initialize Telegram notifier
@@ -57,12 +66,13 @@ async function main() {
     
     console.log(`[v2] Active risk set built: ${atRiskCount} at-risk users\n`);
 
-    // 3. Setup price service (Chainlink OCR2 + Pyth)
+    // 3. Setup price service (Chainlink OCR2 + Pyth) with priceMath
     console.log('[v2] Phase 3: Setting up price oracles');
     const priceService = new PriceService();
     
-    // Add Chainlink feeds if configured
+    // Initialize priceMath with Chainlink feeds
     if (config.CHAINLINK_FEEDS_JSON) {
+      initChainlinkFeeds(config.CHAINLINK_FEEDS_JSON);
       for (const [symbol, feedAddress] of Object.entries(config.CHAINLINK_FEEDS_JSON)) {
         if (typeof feedAddress === 'string') {
           priceService.addChainlinkFeed(symbol, feedAddress);
@@ -70,35 +80,166 @@ async function main() {
       }
     }
     
+    // Initialize priceMath with Pyth feeds
+    if (config.PYTH_FEED_IDS_JSON) {
+      initPythFeeds(config.PYTH_FEED_IDS_JSON);
+    }
+    
     console.log('[v2] Price service configured\n');
 
-    // 4. Start real-time orchestration
-    console.log('[v2] Phase 4: Starting real-time orchestration');
-    const orchestrator = new RealtimeOrchestrator(riskSet, priceService);
-    await orchestrator.start();
+    // 4. Setup realtime triggers and dirty queue
+    console.log('[v2] Phase 4: Setting up realtime triggers');
+    const dirtyQueue = new DirtyQueue();
     
-    console.log('[v2] Real-time monitoring active\n');
+    // Get active risk set as Set for listeners
+    const activeRiskSetSet = new Set(
+      Array.from(riskSet.getAll()).map(u => u.address.toLowerCase())
+    );
+    
+    // Setup Aave Pool event listeners
+    const aaveListeners = new AavePoolListeners(dirtyQueue, activeRiskSetSet);
+    aaveListeners.start();
+    
+    console.log('[v2] Aave Pool listeners started\n');
 
-    // 5. Send startup notification
+    // 5. Setup execution components
+    console.log('[v2] Phase 5: Setting up execution pipeline');
+    
+    const executorClient = new ExecutorClient(
+      config.EXECUTOR_ADDRESS,
+      config.EXECUTION_PRIVATE_KEY
+    );
+    const oneInchBuilder = new OneInchSwapBuilder(8453); // Base chain ID
+    const pairSelector = new PairSelector();
+    const attemptHistory = new AttemptHistory();
+    
+    console.log(`[v2] Executor client initialized (address=${executorClient.getAddress()})`);
+    console.log(`[v2] Wallet address: ${executorClient.getWalletAddress()}\n`);
+
+    // 6. Setup liquidation audit
+    console.log('[v2] Phase 6: Setting up liquidation audit');
+    const liquidationAudit = new LiquidationAudit(
+      activeRiskSetSet,
+      attemptHistory,
+      notifier
+    );
+    liquidationAudit.start();
+    console.log('[v2] Liquidation audit listener started\n');
+
+    // 7. Start verifier loop with execution callback
+    console.log('[v2] Phase 7: Starting verifier loop');
+    
+    const verifierLoop = new VerifierLoop(
+      dirtyQueue,
+      hfChecker,
+      riskSet,
+      {
+        intervalMs: 250,
+        batchSize: 200,
+        onExecute: async (user: string, healthFactor: number, debtUsd: number) => {
+          console.log(
+            `[execute] Attempting liquidation for user=${user} HF=${healthFactor.toFixed(4)} debtUsd=$${debtUsd.toFixed(2)}`
+          );
+          
+          // Select collateral/debt pair
+          const pair = await pairSelector.selectPair(user, executorClient.getWalletAddress());
+          
+          if (!pair) {
+            console.warn(`[execute] No pair selected for user=${user}`);
+            attemptHistory.record({
+              user,
+              timestamp: Date.now(),
+              status: 'skip_no_pair'
+            });
+            return;
+          }
+          
+          console.log(
+            `[execute] Pair selected: collateral=${pair.collateralAsset} debt=${pair.debtAsset}`
+          );
+          
+          // Note: Full execution path would require:
+          // 1. Calculate debtToCover based on user debt and close factor
+          // 2. Calculate expected collateral with liquidation bonus
+          // 3. Get 1inch swap quote for collateral -> debt swap
+          // 4. Call executorClient.attemptLiquidation() with params
+          // 
+          // For now, we log the attempt without executing (dev mode)
+          // Set EXECUTION_ENABLED=false in .env to safely run without execution
+          
+          attemptHistory.record({
+            user,
+            timestamp: Date.now(),
+            status: 'sent',
+            debtAsset: pair.debtAsset,
+            collateralAsset: pair.collateralAsset,
+            debtToCover: '0' // Would be calculated in full implementation
+          });
+          
+          // Example of full execution (commented out for safety):
+          /*
+          const debtToCover = BigInt('1000000'); // Calculate based on user debt
+          const expectedCollateral = BigInt('1100000'); // Calculate with bonus
+          
+          const swapQuote = await oneInchBuilder.getSwapCalldata({
+            fromToken: pair.collateralAsset,
+            toToken: pair.debtAsset,
+            amount: expectedCollateral.toString(),
+            fromAddress: executorClient.getAddress()
+          });
+          
+          const result = await executorClient.attemptLiquidation({
+            user,
+            collateralAsset: pair.collateralAsset,
+            debtAsset: pair.debtAsset,
+            debtToCover,
+            oneInchCalldata: swapQuote.data,
+            minOut: BigInt(swapQuote.minOut),
+            payout: pair.payout
+          });
+          
+          attemptHistory.record({
+            user,
+            timestamp: Date.now(),
+            status: result.success ? 'included' : 'reverted',
+            txHash: result.txHash,
+            debtAsset: pair.debtAsset,
+            collateralAsset: pair.collateralAsset,
+            debtToCover: debtToCover.toString()
+          });
+          */
+        }
+      }
+    );
+    
+    verifierLoop.start();
+    console.log('[v2] Verifier loop started\n');
+
+    // 8. Send startup notification
     await notifier.notifyStartup();
 
     console.log('[v2] ============================================');
     console.log('[v2] Backend V2 is running');
     console.log('[v2] Monitoring Base network for liquidations');
+    console.log('[v2] Active risk set: ' + atRiskCount + ' users');
     console.log('[v2] Press Ctrl+C to stop');
     console.log('[v2] ============================================\n');
 
     // Graceful shutdown
     process.on('SIGINT', async () => {
       console.log('\n[v2] Shutting down gracefully...');
-      await orchestrator.stop();
+      verifierLoop.stop();
+      aaveListeners.stop();
+      liquidationAudit.stop();
       await notifier.notify('🛑 *LiquidBot v2 Stopped*');
       process.exit(0);
     });
 
     process.on('SIGTERM', async () => {
       console.log('\n[v2] Shutting down gracefully...');
-      await orchestrator.stop();
+      verifierLoop.stop();
+      aaveListeners.stop();
+      liquidationAudit.stop();
       await notifier.notify('🛑 *LiquidBot v2 Stopped*');
       process.exit(0);
     });

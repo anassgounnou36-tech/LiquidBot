@@ -20,6 +20,7 @@ export interface HealthFactorResult {
   healthFactor: number;
   totalDebtBase: bigint;
   totalCollateralBase: bigint;
+  debtUsd: number;
 }
 
 /**
@@ -88,11 +89,18 @@ export class HealthFactorChecker {
           // Convert HF from ray (18 decimals) to float
           const healthFactor = Number(healthFactorRaw) / 1e18;
           
+          // Calculate debtUsd from totalDebtBase (in ETH terms)
+          // totalDebtBase is denominated in the base currency (ETH on Base)
+          // We'll approximate using a rough ETH price - this should be replaced with actual price feed
+          // Note: For production, integrate with priceMath.getUsdPrice('ETH')
+          const debtUsd = Number(totalDebtBase) / 1e18 * 3000; // Approximate ETH price
+          
           healthFactors.push({
             address,
             healthFactor,
             totalDebtBase,
-            totalCollateralBase
+            totalCollateralBase,
+            debtUsd
           });
         } catch (err) {
           console.warn(`[hf-checker] Failed to decode result for ${address}:`, err);
