@@ -93,7 +93,7 @@ export class ActiveRiskSet {
    */
   pruneHealthyUsers(): number {
     let removed = 0;
-    for (const [address, candidate] of this.candidates.entries()) {
+    for (const address of this.candidates.keys()) {
       if (this.shouldRemove(address)) {
         this.candidates.delete(address);
         removed++;

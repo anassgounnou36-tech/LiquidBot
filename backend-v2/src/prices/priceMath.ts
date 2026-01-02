@@ -1,7 +1,6 @@
 // priceMath.ts: Pricing math layer with 1e18 BigInt normalization (zero floating point)
 
 import { ethers } from 'ethers';
-import { config } from '../config/index.js';
 import { getHttpProvider } from '../providers/rpc.js';
 
 /**
@@ -164,6 +163,7 @@ async function fetchRatioFeedPrice(symbol: string): Promise<bigint> {
  * 
  * For now, Pyth support is configured but not fully implemented.
  */
+/* eslint-disable @typescript-eslint/no-unused-vars */
 async function fetchPythPrice(symbol: string): Promise<bigint> {
   const feedId = pythFeedIds.get(symbol);
   if (!feedId) {
@@ -179,6 +179,7 @@ async function fetchPythPrice(symbol: string): Promise<bigint> {
   // 5. Normalize to 1e18
   throw new Error(`Pyth price fetching not yet implemented for ${symbol}. Use Chainlink feeds instead.`);
 }
+/* eslint-enable @typescript-eslint/no-unused-vars */
 
 /**
  * Get USD price for a symbol (normalized to 1e18 BigInt)

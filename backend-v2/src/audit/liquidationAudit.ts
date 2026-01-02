@@ -77,8 +77,10 @@ export class LiquidationAudit {
       debtToCover: bigint,
       liquidatedCollateralAmount: bigint,
       liquidator: string,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       receiveAToken: boolean,
-      event: ethers.EventLog
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      event: any
     ) => {
       const liquidationEvent: LiquidationEvent = {
         user: user.toLowerCase(),
@@ -115,7 +117,7 @@ export class LiquidationAudit {
    * Handle a liquidation event
    */
   private async handleLiquidation(event: LiquidationEvent): Promise<void> {
-    const { user, collateralAsset, debtAsset, debtToCover, liquidator, blockNumber, txHash } = event;
+    const { user } = event;
 
     // Check if user was in active risk set
     const inActiveSet = this.activeRiskSet.has(user);
