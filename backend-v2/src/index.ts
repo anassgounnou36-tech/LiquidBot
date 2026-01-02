@@ -1,5 +1,7 @@
 // index.ts: Main entry point for backend-v2 (v2-realtime-pipeline-clean)
 
+import { ethers } from 'ethers';
+import { getHttpProvider } from './providers/rpc.js';
 import { seedBorrowerUniverse } from './subgraph/universe.js';
 import { ActiveRiskSet } from './risk/ActiveRiskSet.js';
 import { HealthFactorChecker } from './risk/HealthFactorChecker.js';
@@ -14,7 +16,7 @@ import { ExecutorClient } from './execution/executorClient.js';
 import { OneInchSwapBuilder } from './execution/oneInch.js';
 import { AttemptHistory } from './execution/attemptHistory.js';
 import { LiquidationAudit } from './audit/liquidationAudit.js';
-import { initChainlinkFeeds, initPythFeeds } from './prices/priceMath.js';
+import { initChainlinkFeeds } from './prices/priceMath.js';
 
 /**
  * Main application entry point
@@ -54,12 +56,13 @@ async function main() {
     // Update risk set with fresh HFs
     let atRiskCount = 0;
     for (const result of results) {
-      riskSet.updateHF(result.address, result.healthFactor);
+      riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18);
       
       if (result.healthFactor < config.HF_THRESHOLD_START) {
         atRiskCount++;
+        const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;
         console.log(
-          `[v2] At-risk user: ${result.address} HF=${result.healthFactor.toFixed(4)}`
+          `[v2] At-risk user: ${result.address} HF=${result.healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)}`
         );
       }
     }
@@ -68,6 +71,11 @@ async function main() {
 
     // 3. Setup price service (Chainlink OCR2 + Pyth) with priceMath
     console.log('[v2] Phase 3: Setting up price oracles');
+    
+    // Pyth is disabled in this version (Option B)
+    console.log('[v2] ⚠️  Pyth price feeds are DISABLED in this version');
+    console.log('[v2] Using Chainlink feeds only for price data');
+    
     const priceService = new PriceService();
     
     // Initialize priceMath with Chainlink feeds
@@ -80,12 +88,9 @@ async function main() {
       }
     }
     
-    // Initialize priceMath with Pyth feeds
-    if (config.PYTH_FEED_IDS_JSON) {
-      initPythFeeds(config.PYTH_FEED_IDS_JSON);
-    }
+    // Do NOT initialize Pyth feeds - disabled
     
-    console.log('[v2] Price service configured\n');
+    console.log('[v2] Price service configured (Chainlink only)\n');
 
     // 4. Setup realtime triggers and dirty queue
     console.log('[v2] Phase 4: Setting up realtime triggers');
@@ -120,6 +125,7 @@ async function main() {
     console.log('[v2] Phase 6: Setting up liquidation audit');
     const liquidationAudit = new LiquidationAudit(
       activeRiskSetSet,
+      riskSet,
       attemptHistory,
       notifier
     );
@@ -129,6 +135,9 @@ async function main() {
     // 7. Start verifier loop with execution callback
     console.log('[v2] Phase 7: Starting verifier loop');
     
+    const executionEnabled = config.EXECUTION_ENABLED;
+    console.log(`[v2] Execution mode: ${executionEnabled ? 'ENABLED ⚠️' : 'DRY RUN (safe)'}`);
+    
     const verifierLoop = new VerifierLoop(
       dirtyQueue,
       hfChecker,
@@ -136,9 +145,10 @@ async function main() {
       {
         intervalMs: 250,
         batchSize: 200,
-        onExecute: async (user: string, healthFactor: number, debtUsd: number) => {
+        onExecute: async (user: string, healthFactor: number, debtUsd1e18: bigint) => {
+          const debtUsdDisplay = Number(debtUsd1e18) / 1e18;
           console.log(
-            `[execute] Attempting liquidation for user=${user} HF=${healthFactor.toFixed(4)} debtUsd=$${debtUsd.toFixed(2)}`
+            `[execute] Liquidation opportunity: user=${user} HF=${healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)}`
           );
           
           // Select collateral/debt pair
@@ -158,56 +168,125 @@ async function main() {
             `[execute] Pair selected: collateral=${pair.collateralAsset} debt=${pair.debtAsset}`
           );
           
-          // Note: Full execution path would require:
-          // 1. Calculate debtToCover based on user debt and close factor
-          // 2. Calculate expected collateral with liquidation bonus
-          // 3. Get 1inch swap quote for collateral -> debt swap
-          // 4. Call executorClient.attemptLiquidation() with params
-          // 
-          // For now, we log the attempt without executing (dev mode)
-          // Set EXECUTION_ENABLED=false in .env to safely run without execution
+          if (!executionEnabled) {
+            // DRY RUN mode: log only
+            console.log('[execute] DRY RUN mode - would attempt liquidation with:');
+            console.log(`[execute]   user: ${user}`);
+            console.log(`[execute]   collateral: ${pair.collateralAsset}`);
+            console.log(`[execute]   debt: ${pair.debtAsset}`);
+            console.log(`[execute]   Set EXECUTION_ENABLED=true to enable real execution`);
+            
+            attemptHistory.record({
+              user,
+              timestamp: Date.now(),
+              status: 'sent',
+              debtAsset: pair.debtAsset,
+              collateralAsset: pair.collateralAsset,
+              debtToCover: '0'
+            });
+            return;
+          }
           
-          attemptHistory.record({
-            user,
-            timestamp: Date.now(),
-            status: 'sent',
-            debtAsset: pair.debtAsset,
-            collateralAsset: pair.collateralAsset,
-            debtToCover: '0' // Would be calculated in full implementation
-          });
-          
-          // Example of full execution (commented out for safety):
-          /*
-          const debtToCover = BigInt('1000000'); // Calculate based on user debt
-          const expectedCollateral = BigInt('1100000'); // Calculate with bonus
-          
-          const swapQuote = await oneInchBuilder.getSwapCalldata({
-            fromToken: pair.collateralAsset,
-            toToken: pair.debtAsset,
-            amount: expectedCollateral.toString(),
-            fromAddress: executorClient.getAddress()
-          });
-          
-          const result = await executorClient.attemptLiquidation({
-            user,
-            collateralAsset: pair.collateralAsset,
-            debtAsset: pair.debtAsset,
-            debtToCover,
-            oneInchCalldata: swapQuote.data,
-            minOut: BigInt(swapQuote.minOut),
-            payout: pair.payout
-          });
-          
-          attemptHistory.record({
-            user,
-            timestamp: Date.now(),
-            status: result.success ? 'included' : 'reverted',
-            txHash: result.txHash,
-            debtAsset: pair.debtAsset,
-            collateralAsset: pair.collateralAsset,
-            debtToCover: debtToCover.toString()
-          });
-          */
+          // REAL EXECUTION PATH (guarded by EXECUTION_ENABLED)
+          try {
+            // Get user account data to calculate debtToCover
+            const provider = getHttpProvider();
+            const poolContract = new ethers.Contract(
+              config.AAVE_POOL_ADDRESS,
+              ['function getUserAccountData(address user) external view returns (uint256 totalCollateralBase, uint256 totalDebtBase, uint256 availableBorrowsBase, uint256 currentLiquidationThreshold, uint256 ltv, uint256 healthFactor)'],
+              provider
+            );
+            
+            const accountData = await poolContract.getUserAccountData(user);
+            const totalDebtBase = BigInt(accountData.totalDebtBase.toString());
+            
+            // Calculate debtToCover: 50% close factor (fixed)
+            const debtToCover = totalDebtBase / 2n;
+            
+            console.log(`[execute] Calculated debtToCover: ${debtToCover.toString()} (50% of ${totalDebtBase.toString()})`);
+            
+            // Get debt asset reserves to query for debt token info
+            const debtReserveContract = new ethers.Contract(
+              pair.debtAsset,
+              ['function decimals() external view returns (uint8)'],
+              provider
+            );
+            
+            const debtDecimals = await debtReserveContract.decimals();
+            
+            // Convert debtToCover from 1e8 to debt token decimals
+            let debtToCoverNative: bigint;
+            if (debtDecimals === 8) {
+              debtToCoverNative = debtToCover;
+            } else if (debtDecimals < 8) {
+              debtToCoverNative = debtToCover / (10n ** BigInt(8 - debtDecimals));
+            } else {
+              debtToCoverNative = debtToCover * (10n ** BigInt(debtDecimals - 8));
+            }
+            
+            // Get expected collateral with liquidation bonus (assume 5% bonus)
+            const expectedCollateralWithBonus = (debtToCoverNative * 105n) / 100n;
+            
+            console.log(`[execute] Expected collateral (with 5% bonus): ${expectedCollateralWithBonus.toString()}`);
+            
+            // Build 1inch swap calldata
+            const swapQuote = await oneInchBuilder.getSwapCalldata({
+              fromToken: pair.collateralAsset,
+              toToken: pair.debtAsset,
+              amount: expectedCollateralWithBonus.toString(),
+              fromAddress: executorClient.getAddress(),
+              slippageBps: 100 // 1% slippage
+            });
+            
+            console.log(`[execute] 1inch swap quote obtained: minOut=${swapQuote.minOut}`);
+            
+            // Execute liquidation
+            const result = await executorClient.attemptLiquidation({
+              user,
+              collateralAsset: pair.collateralAsset,
+              debtAsset: pair.debtAsset,
+              debtToCover: debtToCoverNative,
+              oneInchCalldata: swapQuote.data,
+              minOut: BigInt(swapQuote.minOut),
+              payout: pair.payout
+            });
+            
+            if (result.success) {
+              console.log(`[execute] ✅ Liquidation successful! txHash=${result.txHash}`);
+              attemptHistory.record({
+                user,
+                timestamp: Date.now(),
+                status: 'included',
+                txHash: result.txHash,
+                debtAsset: pair.debtAsset,
+                collateralAsset: pair.collateralAsset,
+                debtToCover: debtToCoverNative.toString()
+              });
+            } else {
+              console.error(`[execute] ❌ Liquidation failed: ${result.error}`);
+              attemptHistory.record({
+                user,
+                timestamp: Date.now(),
+                status: result.txHash ? 'reverted' : 'error',
+                txHash: result.txHash,
+                error: result.error,
+                debtAsset: pair.debtAsset,
+                collateralAsset: pair.collateralAsset,
+                debtToCover: debtToCoverNative.toString()
+              });
+            }
+          } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            console.error(`[execute] ❌ Exception during liquidation: ${errorMsg}`);
+            attemptHistory.record({
+              user,
+              timestamp: Date.now(),
+              status: 'error',
+              error: errorMsg,
+              debtAsset: pair.debtAsset,
+              collateralAsset: pair.collateralAsset
+            });
+          }
         }
       }
     );

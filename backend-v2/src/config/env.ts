@@ -47,6 +47,9 @@ const envSchema = z.object({
   // 1inch API (optional for PR2)
   ONEINCH_API_KEY: z.string().optional(),
 
+  // Execution control
+  EXECUTION_ENABLED: z.string().transform(val => val === 'true').default('false'),
+
   // Telegram
   TELEGRAM_BOT_TOKEN: z.string().min(1),
   TELEGRAM_CHAT_ID: z.string().min(1),

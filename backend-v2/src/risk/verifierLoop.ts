@@ -16,7 +16,7 @@ export class VerifierLoop {
   private batchSize: number;
   private intervalHandle: NodeJS.Timeout | null = null;
   private running = false;
-  private onExecute?: (user: string, healthFactor: number, debtUsd: number) => Promise<void>;
+  private onExecute?: (user: string, healthFactor: number, debtUsd1e18: bigint) => Promise<void>;
 
   constructor(
     dirtyQueue: DirtyQueue,
@@ -25,7 +25,7 @@ export class VerifierLoop {
     options?: {
       intervalMs?: number;
       batchSize?: number;
-      onExecute?: (user: string, healthFactor: number, debtUsd: number) => Promise<void>;
+      onExecute?: (user: string, healthFactor: number, debtUsd1e18: bigint) => Promise<void>;
     }
   ) {
     this.dirtyQueue = dirtyQueue;
@@ -85,17 +85,18 @@ export class VerifierLoop {
     const results = await this.hfChecker.checkBatch(batch, batch.length);
     
     for (const result of results) {
-      // Update active risk set with fresh HF
-      this.activeRiskSet.updateHF(result.address, result.healthFactor);
+      // Update active risk set with fresh HF and debtUsd1e18
+      this.activeRiskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18);
 
       // Check if user should be executed
+      const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
       const shouldExecute =
         result.healthFactor <= config.HF_THRESHOLD_EXECUTE &&
-        result.debtUsd >= config.MIN_DEBT_USD;
+        result.debtUsd1e18 >= minDebtUsd1e18;
 
       if (shouldExecute && this.onExecute) {
         try {
-          await this.onExecute(result.address, result.healthFactor, result.debtUsd);
+          await this.onExecute(result.address, result.healthFactor, result.debtUsd1e18);
         } catch (err) {
           console.error(
             `[verifierLoop] Execution failed for ${result.address}:`,

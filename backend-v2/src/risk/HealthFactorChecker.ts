@@ -3,6 +3,7 @@
 import { Contract, Interface } from 'ethers';
 import { getHttpProvider } from '../providers/rpc.js';
 import { config } from '../config/index.js';
+import { getUsdPrice } from '../prices/priceMath.js';
 
 const MULTICALL3_ABI = [
   'function aggregate3(tuple(address target, bool allowFailure, bytes callData)[] calls) external payable returns (tuple(bool success, bytes returnData)[] returnData)'
@@ -20,7 +21,7 @@ export interface HealthFactorResult {
   healthFactor: number;
   totalDebtBase: bigint;
   totalCollateralBase: bigint;
-  debtUsd: number;
+  debtUsd1e18: bigint;
 }
 
 /**
@@ -68,6 +69,9 @@ export class HealthFactorChecker {
     // Execute multicall
     const results = await this.multicall3.aggregate3.staticCall(calls);
     
+    // Get ETH USD price once for all conversions (1e18 BigInt)
+    const ethUsd1e18 = await getUsdPrice('ETH');
+    
     // Parse results
     const healthFactors: HealthFactorResult[] = [];
     
@@ -86,21 +90,23 @@ export class HealthFactorChecker {
           const totalDebtBase = decoded[1];
           const healthFactorRaw = decoded[5];
           
-          // Convert HF from ray (18 decimals) to float
+          // Convert HF from ray (18 decimals) to float (for logging only)
           const healthFactor = Number(healthFactorRaw) / 1e18;
           
-          // Calculate debtUsd from totalDebtBase (in ETH terms)
-          // totalDebtBase is denominated in the base currency (ETH on Base)
-          // We'll approximate using a rough ETH price - this should be replaced with actual price feed
-          // Note: For production, integrate with priceMath.getUsdPrice('ETH')
-          const debtUsd = Number(totalDebtBase) / 1e18 * 3000; // Approximate ETH price
+          // Calculate debtUsd1e18 from totalDebtBase using priceMath
+          // totalDebtBase is in 1e8 units (Aave base currency)
+          // Step 1: Convert to 1e18
+          const totalDebtBase1e18 = BigInt(totalDebtBase.toString()) * (10n ** 10n);
+          
+          // Step 2: Multiply by ETH USD price (both 1e18)
+          const debtUsd1e18 = (totalDebtBase1e18 * ethUsd1e18) / (10n ** 18n);
           
           healthFactors.push({
             address,
             healthFactor,
             totalDebtBase,
             totalCollateralBase,
-            debtUsd
+            debtUsd1e18
           });
         } catch (err) {
           console.warn(`[hf-checker] Failed to decode result for ${address}:`, err);

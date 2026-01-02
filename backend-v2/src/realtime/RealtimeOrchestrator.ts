@@ -91,13 +91,14 @@ export class RealtimeOrchestrator {
 
     // Update risk set with fresh HFs
     for (const result of results) {
-      this.riskSet.updateHF(result.address, result.healthFactor);
+      this.riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18);
 
       // Check if liquidatable (HF < execute threshold)
       if (result.healthFactor < config.HF_THRESHOLD_EXECUTE) {
+        const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;
         console.log(
           `[realtime] LIQUIDATABLE: user=${result.address} hf=${result.healthFactor.toFixed(4)} ` +
-          `block=${blockNumber}`
+          `debtUsd=$${debtUsdDisplay.toFixed(2)} block=${blockNumber}`
         );
         // TODO PR2: Trigger execution
       }
@@ -129,12 +130,13 @@ export class RealtimeOrchestrator {
 
     // Update risk set
     for (const result of results) {
-      this.riskSet.updateHF(result.address, result.healthFactor);
+      this.riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18);
 
       if (result.healthFactor < config.HF_THRESHOLD_EXECUTE) {
+        const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;
         console.log(
           `[realtime] LIQUIDATABLE (price-trigger): user=${result.address} ` +
-          `hf=${result.healthFactor.toFixed(4)} trigger=${update.symbol}`
+          `hf=${result.healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)} trigger=${update.symbol}`
         );
         // TODO PR2: Trigger execution
       }
