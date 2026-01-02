@@ -1,10 +1,17 @@
 // index.ts: Main entry point for backend-v2
+// PR2: Realtime pipeline + execution + audit
 
 import { seedBorrowerUniverse } from './subgraph/universe.js';
 import { ActiveRiskSet } from './risk/ActiveRiskSet.js';
 import { HealthFactorChecker } from './risk/HealthFactorChecker.js';
-import { PriceService } from './prices/PriceService.js';
-import { RealtimeOrchestrator } from './realtime/RealtimeOrchestrator.js';
+import { getHttpProvider } from './providers/rpc.js';
+import { getWsProvider } from './providers/ws.js';
+import { DirtyQueue } from './realtime/dirtyQueue.js';
+import { startAavePoolListeners } from './realtime/aavePoolListeners.js';
+import { startVerifierLoop } from './risk/verifierLoop.js';
+import { ChainlinkListener } from './prices/ChainlinkListener.js';
+import { PythListener } from './prices/PythListener.js';
+import { startLiquidationAudit } from './audit/liquidationAudit.js';
 import { TelegramNotifier } from './notify/TelegramNotifier.js';
 import { config } from './config/index.js';
 
@@ -13,14 +20,18 @@ import { config } from './config/index.js';
  */
 async function main() {
   console.log('[v2] ============================================');
-  console.log('[v2] LiquidBot Backend V2 - PR1 Foundation');
-  console.log('[v2] Base-only Aave V3 liquidation detection');
+  console.log('[v2] LiquidBot Backend V2 - PR2 Realtime Pipeline');
+  console.log('[v2] Base-only Aave V3 liquidation detection + execution');
   console.log('[v2] ============================================\n');
 
   // Initialize Telegram notifier
   const notifier = new TelegramNotifier();
   
   try {
+    // Initialize providers
+    const http = getHttpProvider();
+    const ws = getWsProvider();
+
     // 1. Seed borrower universe from subgraph
     console.log('[v2] Phase 1: Universe seeding from subgraph');
     const users = await seedBorrowerUniverse({
@@ -57,48 +68,88 @@ async function main() {
     
     console.log(`[v2] Active risk set built: ${atRiskCount} at-risk users\n`);
 
-    // 3. Setup price service (Chainlink OCR2 + Pyth)
-    console.log('[v2] Phase 3: Setting up price oracles');
-    const priceService = new PriceService();
-    
-    // Add Chainlink feeds if configured
+    // 3. Initialize dirty queue and start realtime pipeline
+    console.log('[v2] Phase 3: Starting realtime pipeline');
+    const queue = new DirtyQueue();
+
+    // Start Aave Pool event listeners (mark users dirty on events)
+    startAavePoolListeners(ws, config.AAVE_POOL_ADDRESS, (user) => {
+      queue.markDirty(user);
+    });
+
+    // Start Chainlink price listeners (mark all active users dirty on price updates)
     if (config.CHAINLINK_FEEDS_JSON) {
+      const chainlinkListener = new ChainlinkListener();
+      
       for (const [symbol, feedAddress] of Object.entries(config.CHAINLINK_FEEDS_JSON)) {
         if (typeof feedAddress === 'string') {
-          priceService.addChainlinkFeed(symbol, feedAddress);
+          chainlinkListener.addFeed(symbol, feedAddress);
         }
       }
+
+      chainlinkListener.onPriceUpdate(() => {
+        // Mark all active users dirty (bounded by verifier loop batch cap)
+        for (const candidate of riskSet.getAll()) {
+          queue.markDirty(candidate.address);
+        }
+      });
+
+      await chainlinkListener.start();
+      console.log('[v2] Chainlink listeners started');
     }
-    
-    console.log('[v2] Price service configured\n');
 
-    // 4. Start real-time orchestration
-    console.log('[v2] Phase 4: Starting real-time orchestration');
-    const orchestrator = new RealtimeOrchestrator(riskSet, priceService);
-    await orchestrator.start();
+    // Start Pyth price listener
+    const pythListener = new PythListener();
     
-    console.log('[v2] Real-time monitoring active\n');
+    pythListener.onPriceUpdate(() => {
+      // Mark all active users dirty on price updates
+      for (const candidate of riskSet.getAll()) {
+        queue.markDirty(candidate.address);
+      }
+    });
 
-    // 5. Send startup notification
-    await notifier.notifyStartup();
+    pythListener.start();
+    console.log('[v2] Pyth listener started\n');
+
+    // 4. Start HF verifier loop
+    console.log('[v2] Phase 4: Starting HF verifier loop');
+    startVerifierLoop({
+      http,
+      aavePool: config.AAVE_POOL_ADDRESS,
+      queue,
+      minDebtUsd: config.MIN_DEBT_USD,
+      hfExecute: config.HF_THRESHOLD_EXECUTE,
+      batchCap: 200,
+      blockTagMode: 'latest'
+    });
+    console.log('[v2] Verifier loop started\n');
+
+    // 5. Start liquidation audit service
+    console.log('[v2] Phase 5: Starting liquidation audit');
+    startLiquidationAudit(ws, config.AAVE_POOL_ADDRESS);
+    console.log('[v2] Liquidation audit started\n');
+
+    // 6. Send startup notification
+    await notifier.notify('🤖 *LiquidBot v2 PR2 Started*\n\nRealtime pipeline + execution + audit active');
 
     console.log('[v2] ============================================');
-    console.log('[v2] Backend V2 is running');
+    console.log('[v2] Backend V2 PR2 is running');
     console.log('[v2] Monitoring Base network for liquidations');
+    console.log(`[v2] Active set size: ${riskSet.size()}`);
     console.log('[v2] Press Ctrl+C to stop');
     console.log('[v2] ============================================\n');
 
     // Graceful shutdown
     process.on('SIGINT', async () => {
       console.log('\n[v2] Shutting down gracefully...');
-      await orchestrator.stop();
+      pythListener.stop();
       await notifier.notify('🛑 *LiquidBot v2 Stopped*');
       process.exit(0);
     });
 
     process.on('SIGTERM', async () => {
       console.log('\n[v2] Shutting down gracefully...');
-      await orchestrator.stop();
+      pythListener.stop();
       await notifier.notify('🛑 *LiquidBot v2 Stopped*');
       process.exit(0);
     });
