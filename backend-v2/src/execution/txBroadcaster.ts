@@ -1,16 +1,14 @@
 // execution/txBroadcaster.ts: Multi-RPC broadcast with transaction replacement
 
-import { ethers } from 'ethers';
+import { ethers, TransactionReceipt } from 'ethers';
 
 /**
- * Broadcast result
+ * Broadcast result with status discrimination
  */
-export interface BroadcastResult {
-  success: boolean;
-  txHash?: string;
-  error?: string;
-  rpcUsed?: string;
-}
+export type BroadcastResult =
+  | { status: 'mined'; txHash: string; receipt: TransactionReceipt; rpcUsed: string }
+  | { status: 'pending'; txHash: string; rpcUsed: string }
+  | { status: 'failed'; error: string; lastTxHash?: string };
 
 /**
  * Broadcast options
@@ -66,14 +64,14 @@ export class TxBroadcaster {
   }
 
   /**
-   * Check if transaction is mined
+   * Check if transaction is mined and return receipt
    */
-  private async isTxMined(txHash: string, provider: ethers.JsonRpcProvider): Promise<boolean> {
+  private async getTxReceipt(txHash: string, provider: ethers.JsonRpcProvider): Promise<TransactionReceipt | null> {
     try {
       const receipt = await provider.getTransactionReceipt(txHash);
-      return receipt !== null;
+      return receipt;
     } catch {
-      return false;
+      return null;
     }
   }
 
@@ -82,7 +80,7 @@ export class TxBroadcaster {
    * 
    * @param wallet Wallet to sign transactions
    * @param txRequest Transaction request
-   * @returns Broadcast result
+   * @returns Broadcast result with status discrimination
    */
   async broadcastWithReplacement(
     wallet: ethers.Wallet,
@@ -97,10 +95,13 @@ export class TxBroadcaster {
       let currentMaxFee = txRequest.maxFeePerGas || ethers.parseUnits('50', 'gwei');
       let currentNonce = txRequest.nonce;
       
-      // If nonce not provided, get it
+      // Always get nonce from "pending" to avoid collisions
       if (currentNonce === undefined || currentNonce === null) {
-        currentNonce = await wallet.getNonce();
+        currentNonce = await wallet.getNonce('pending');
+        console.log(`[txBroadcaster] Using pending nonce: ${currentNonce}`);
       }
+
+      let lastTxHash: string | null = null;
 
       for (let attempt = 0; attempt <= this.options.maxReplacements; attempt++) {
         // Sign transaction
@@ -121,25 +122,39 @@ export class TxBroadcaster {
           console.error('[txBroadcaster] Failed to broadcast to any RPC');
           if (attempt === this.options.maxReplacements) {
             return {
-              success: false,
-              error: 'Failed to broadcast to any RPC'
+              status: 'failed',
+              error: 'Failed to broadcast to any RPC',
+              lastTxHash: lastTxHash || undefined
             };
           }
           continue;
         }
 
+        lastTxHash = txHash;
+
         // Wait for inclusion or delay
         const startTime = Date.now();
         while (Date.now() - startTime < this.options.replacementDelayMs) {
-          const mined = await this.isTxMined(txHash, monitorProvider);
+          const receipt = await this.getTxReceipt(txHash, monitorProvider);
           
-          if (mined) {
-            console.log(`[txBroadcaster] Transaction mined: ${txHash}`);
-            return {
-              success: true,
-              txHash,
-              rpcUsed: this.options.rpcUrls[0]
-            };
+          if (receipt !== null) {
+            // Check if transaction succeeded
+            if (receipt.status === 1) {
+              console.log(`[txBroadcaster] Transaction mined successfully: ${txHash}`);
+              return {
+                status: 'mined',
+                txHash,
+                receipt,
+                rpcUsed: this.options.rpcUrls[0]
+              };
+            } else {
+              console.error(`[txBroadcaster] Transaction reverted: ${txHash}`);
+              return {
+                status: 'failed',
+                error: 'Transaction reverted',
+                lastTxHash: txHash
+              };
+            }
           }
 
           // Wait 500ms before checking again
@@ -148,11 +163,11 @@ export class TxBroadcaster {
 
         console.log(`[txBroadcaster] Transaction not mined after ${this.options.replacementDelayMs}ms`);
 
-        // If this was the last attempt, return the hash anyway
+        // If this was the last attempt, return pending status
         if (attempt === this.options.maxReplacements) {
-          console.log(`[txBroadcaster] Max replacements reached, returning last tx: ${txHash}`);
+          console.log(`[txBroadcaster] Max replacements reached, tx still pending: ${txHash}`);
           return {
-            success: true,
+            status: 'pending',
             txHash,
             rpcUsed: this.options.rpcUrls[0]
           };
@@ -167,14 +182,15 @@ export class TxBroadcaster {
       }
 
       return {
-        success: false,
-        error: 'Failed after all replacement attempts'
+        status: 'failed',
+        error: 'Failed after all replacement attempts',
+        lastTxHash: lastTxHash || undefined
       };
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error('[txBroadcaster] Broadcast failed:', errorMsg);
       return {
-        success: false,
+        status: 'failed',
         error: errorMsg
       };
     }

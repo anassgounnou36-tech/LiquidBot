@@ -169,12 +169,23 @@ export class ExecutorClient {
         console.log('[executor] Using multi-RPC broadcast with replacement strategy');
         const result = await this.broadcaster.broadcastWithReplacement(this.wallet, txRequest);
         
-        if (result.success && result.txHash) {
+        if (result.status === 'mined') {
           console.log('[executor] Transaction confirmed:', result.txHash);
           return { success: true, txHash: result.txHash };
+        } else if (result.status === 'pending') {
+          console.warn('[executor] Transaction still pending after max retries:', result.txHash);
+          return { 
+            success: false, 
+            txHash: result.txHash,
+            error: 'Transaction pending (not mined within timeout)' 
+          };
         } else {
           console.error('[executor] Broadcast failed:', result.error);
-          return { success: false, error: result.error };
+          return { 
+            success: false, 
+            txHash: result.lastTxHash,
+            error: result.error 
+          };
         }
       } else {
         // Single RPC path (legacy)
