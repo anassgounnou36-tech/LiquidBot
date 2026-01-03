@@ -47,35 +47,8 @@ async function main() {
     
     console.log(`[v2] Universe seeded: ${users.length} users\n`);
 
-    // 2. Build initial active risk set with on-chain HF checks
-    console.log('[v2] Phase 2: Building active risk set');
-    const riskSet = new ActiveRiskSet();
-    riskSet.addBulk(users);
-    
-    const hfChecker = new HealthFactorChecker();
-    console.log('[v2] Checking health factors for all users (this may take a while)...');
-    
-    const results = await hfChecker.checkBatch(users, 100);
-    console.log(`[v2] Checked ${results.length} users`);
-    
-    // Update risk set with fresh HFs
-    let atRiskCount = 0;
-    for (const result of results) {
-      riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18);
-      
-      if (result.healthFactor < config.HF_THRESHOLD_START) {
-        atRiskCount++;
-        const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;
-        console.log(
-          `[v2] At-risk user: ${result.address} HF=${result.healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)}`
-        );
-      }
-    }
-    
-    console.log(`[v2] Active risk set built: ${atRiskCount} at-risk users\n`);
-
-    // 3. Setup protocol data caching and address→symbol mapping
-    console.log('[v2] Phase 3: Building protocol data cache');
+    // 2. Setup protocol data caching and address→symbol mapping
+    console.log('[v2] Phase 2: Building protocol data cache');
     const dataProvider = new ProtocolDataProvider(config.AAVE_PROTOCOL_DATA_PROVIDER);
     
     // Get all reserves and build address→symbol mapping
@@ -94,8 +67,8 @@ async function main() {
     
     console.log(`[v2] Protocol data cached: ${allReserves.length} reserves\n`);
     
-    // 4. Setup price oracles (Chainlink only, Pyth disabled)
-    console.log('[v2] Phase 4: Setting up price oracles');
+    // 3. Setup price oracles (Chainlink only, Pyth disabled)
+    console.log('[v2] Phase 3: Setting up price oracles');
     
     // Pyth is disabled in this version
     console.log('[v2] ⚠️  Pyth price feeds are DISABLED in this version');
@@ -157,6 +130,33 @@ async function main() {
     await chainlinkListener.start();
     
     console.log('[v2] Price oracles configured (Chainlink only)\n');
+
+    // 4. Build initial active risk set with on-chain HF checks
+    console.log('[v2] Phase 4: Building active risk set');
+    const riskSet = new ActiveRiskSet();
+    riskSet.addBulk(users);
+    
+    const hfChecker = new HealthFactorChecker();
+    console.log('[v2] Checking health factors for all users (this may take a while)...');
+    
+    const results = await hfChecker.checkBatch(users, 100);
+    console.log(`[v2] Checked ${results.length} users`);
+    
+    // Update risk set with fresh HFs
+    let atRiskCount = 0;
+    for (const result of results) {
+      riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18);
+      
+      if (result.healthFactor < config.HF_THRESHOLD_START) {
+        atRiskCount++;
+        const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;
+        console.log(
+          `[v2] At-risk user: ${result.address} HF=${result.healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)}`
+        );
+      }
+    }
+    
+    console.log(`[v2] Active risk set built: ${atRiskCount} at-risk users\n`);
 
     // 5. Setup realtime triggers and dirty queue
     console.log('[v2] Phase 5: Setting up realtime triggers');
