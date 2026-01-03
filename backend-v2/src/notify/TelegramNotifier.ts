@@ -4,6 +4,16 @@ import TelegramBot from 'node-telegram-bot-api';
 import { config } from '../config/index.js';
 
 /**
+ * Escape HTML special characters for Telegram HTML mode
+ */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
  * TelegramNotifier: Send notifications to Telegram
  */
 export class TelegramNotifier {
@@ -24,7 +34,7 @@ export class TelegramNotifier {
   }
 
   /**
-   * Send a notification
+   * Send a notification with HTML formatting and fallback to plain text
    */
   async notify(message: string): Promise<void> {
     if (!this.enabled || !this.bot) {
@@ -32,9 +42,16 @@ export class TelegramNotifier {
     }
 
     try {
-      await this.bot.sendMessage(this.chatId, message, { parse_mode: 'Markdown' });
+      // Try sending with HTML parse mode
+      await this.bot.sendMessage(this.chatId, message, { parse_mode: 'HTML' });
     } catch (err) {
-      console.error('[telegram] Failed to send notification:', err);
+      // Fallback: send as plain text without parse_mode
+      console.warn('[telegram] HTML parse failed, retrying as plain text:', err instanceof Error ? err.message : err);
+      try {
+        await this.bot.sendMessage(this.chatId, message);
+      } catch (fallbackErr) {
+        console.error('[telegram] Failed to send notification (both HTML and plain text):', fallbackErr);
+      }
     }
   }
 
@@ -42,7 +59,9 @@ export class TelegramNotifier {
    * Send startup notification
    */
   async notifyStartup(): Promise<void> {
-    const message = `🤖 *LiquidBot v2 Started*\n\nFoundation PR1: Universe seeding + oracles active`;
+    const message = 
+      `🤖 <b>LiquidBot v2 Started</b>\n\n` +
+      `Foundation PR1: Universe seeding + oracles active`;
     await this.notify(message);
   }
 
@@ -51,11 +70,11 @@ export class TelegramNotifier {
    */
   async notifyLiquidation(userAddress: string, healthFactor: number, blockNumber: number): Promise<void> {
     const message = 
-      `⚠️ *Liquidatable User Detected*\n\n` +
-      `User: \`${userAddress}\`\n` +
+      `⚠️ <b>Liquidatable User Detected</b>\n\n` +
+      `User: <code>${escapeHtml(userAddress)}</code>\n` +
       `Health Factor: ${healthFactor.toFixed(4)}\n` +
       `Block: ${blockNumber}\n` +
-      `\n_PR2 execution pending_`;
+      `\n<i>PR2 execution pending</i>`;
     
     await this.notify(message);
   }
@@ -64,7 +83,7 @@ export class TelegramNotifier {
    * Send error alert
    */
   async notifyError(error: string): Promise<void> {
-    const message = `🚨 *Error*\n\n${error}`;
+    const message = `🚨 <b>Error</b>\n\n${escapeHtml(error)}`;
     await this.notify(message);
   }
 }

@@ -13,7 +13,7 @@ import { ExecutorClient } from './execution/executorClient.js';
 import { OneInchSwapBuilder } from './execution/oneInch.js';
 import { AttemptHistory } from './execution/attemptHistory.js';
 import { LiquidationAudit } from './audit/liquidationAudit.js';
-import { initChainlinkFeeds, initChainlinkFeedsByAddress, initAddressToSymbolMapping, updateCachedPrice, cacheTokenDecimals, setChainlinkListener } from './prices/priceMath.js';
+import { initChainlinkFeeds, initChainlinkFeedsByAddress, initAddressToSymbolMapping, updateCachedPrice, cacheTokenDecimals, setChainlinkListener, resolveEthUsdFeedAddress, getNormalizedPriceFromFeed } from './prices/priceMath.js';
 import { LiquidationPlanner } from './execution/liquidationPlanner.js';
 import { ProtocolDataProvider } from './aave/protocolDataProvider.js';
 import { metrics } from './metrics/metrics.js';
@@ -129,7 +129,32 @@ async function main() {
     // Start Chainlink listener
     await chainlinkListener.start();
     
-    console.log('[v2] Price oracles configured (Chainlink only)\n');
+    console.log('[v2] Price oracles configured (Chainlink only)');
+    
+    // Warm up ETH/WETH price cache before HF scan to avoid cache misses
+    console.log('[v2] Warming up ETH/WETH price cache...');
+    const ethFeedAddress = resolveEthUsdFeedAddress();
+    if (!ethFeedAddress) {
+      throw new Error(
+        'Fatal: No ETH/WETH Chainlink feed configured. ' +
+        'Please set CHAINLINK_FEEDS_JSON with ETH or WETH feed address.'
+      );
+    }
+    
+    try {
+      const ethPrice = await getNormalizedPriceFromFeed(ethFeedAddress);
+      updateCachedPrice('ETH', ethPrice);
+      updateCachedPrice('WETH', ethPrice); // Also cache as WETH for aliasing
+      console.log(`[v2] ETH/WETH price warmed: ${ethPrice.toString()} (1e18)`);
+    } catch (err) {
+      throw new Error(
+        `Fatal: Failed to warm up ETH/WETH price from feed ${ethFeedAddress}: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+    
+    console.log('[v2] Price cache warm-up complete\n');
 
     // 4. Build initial active risk set with on-chain HF checks
     console.log('[v2] Phase 4: Building active risk set');
@@ -464,7 +489,7 @@ async function main() {
       verifierLoop.stop();
       aaveListeners.stop();
       liquidationAudit.stop();
-      await notifier.notify('🛑 *LiquidBot v2 Stopped*');
+      await notifier.notify('🛑 <b>LiquidBot v2 Stopped</b>');
       process.exit(0);
     });
 
@@ -473,7 +498,7 @@ async function main() {
       verifierLoop.stop();
       aaveListeners.stop();
       liquidationAudit.stop();
-      await notifier.notify('🛑 *LiquidBot v2 Stopped*');
+      await notifier.notify('🛑 <b>LiquidBot v2 Stopped</b>');
       process.exit(0);
     });
 
