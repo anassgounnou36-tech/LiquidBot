@@ -47,6 +47,18 @@ const tokenDecimalsCache = new Map<string, number>();
 let chainlinkListenerInstance: ChainlinkListener | null = null;
 
 /**
+ * Cache miss warning cooldown (symbol -> last warn timestamp)
+ * Prevents log spam when cache is cold
+ */
+const lastMissWarnAt = new Map<string, number>();
+
+/**
+ * Default TTL for local price cache (5 minutes)
+ * Prices older than this are considered stale
+ */
+const DEFAULT_PRICE_CACHE_TTL_MS = 5 * 60 * 1000;
+
+/**
  * Initialize Chainlink feed addresses from config
  * Implements ETH→WETH aliasing for Base network
  */
@@ -189,6 +201,48 @@ async function getChainlinkDecimals(feedAddress: string): Promise<number> {
 }
 
 /**
+ * Get price from local cache with TTL check
+ * Returns null if not cached or stale
+ * @param symbol Asset symbol (e.g., "ETH", "USDC")
+ * @param ttlMs Time-to-live in milliseconds
+ */
+function getLocalCachedPrice(symbol: string, ttlMs: number): bigint | null {
+  const normalizedSymbol = symbol.toUpperCase();
+  const cached = priceCache.get(normalizedSymbol);
+  
+  if (!cached) {
+    return null;
+  }
+  
+  const now = Date.now();
+  const age = now - cached.timestamp;
+  
+  if (age > ttlMs) {
+    // Stale - don't return
+    return null;
+  }
+  
+  return cached.price;
+}
+
+/**
+ * Log cache miss warning with cooldown to prevent spam
+ * Only warns once per symbol per minute
+ * @param symbol Asset symbol
+ * @param context Additional context (e.g., "direct feed", "ratio feed")
+ */
+function warnCacheMissOnce(symbol: string, context: string): void {
+  const now = Date.now();
+  const lastWarn = lastMissWarnAt.get(symbol);
+  const cooldownMs = 60 * 1000; // 1 minute
+  
+  if (!lastWarn || (now - lastWarn) > cooldownMs) {
+    console.warn(`[priceMath] Cache miss for ${symbol} (${context}), falling back to RPC`);
+    lastMissWarnAt.set(symbol, now);
+  }
+}
+
+/**
  * Fetch Chainlink price and normalize to 1e18 BigInt
  */
 async function fetchChainlinkPrice(symbol: string): Promise<bigint> {
@@ -256,7 +310,7 @@ async function fetchRatioFeedPrice(symbol: string): Promise<bigint> {
 
   // If either is missing, fall back to RPC
   if (ratio === null) {
-    console.warn(`[priceMath] Cache miss for ${symbol}_ETH, falling back to RPC`);
+    warnCacheMissOnce(`${symbol}_ETH`, 'ratio feed');
     const provider = getHttpProvider();
     const ratioFeedContract = new ethers.Contract(
       ethRatioFeedAddress,
@@ -279,7 +333,7 @@ async function fetchRatioFeedPrice(symbol: string): Promise<bigint> {
   }
 
   if (ethUsdPrice === null) {
-    console.warn('[priceMath] Cache miss for ETH/USD, falling back to RPC');
+    warnCacheMissOnce('ETH', 'ratio composition');
     ethUsdPrice = await fetchChainlinkPrice('ETH');
   }
 
@@ -323,20 +377,31 @@ async function fetchPythPrice(symbol: string): Promise<bigint> {
  * Falls back to RPC only if cache miss on startup
  * Supports Chainlink direct feeds and ratio feeds
  * NOTE: Pyth is disabled in this version - use Chainlink feeds only
+ * 
+ * Cache layering (in order):
+ * 1. Local priceCache (warmed at startup, updated by ChainlinkListener)
+ * 2. ChainlinkListener cache (updated by OCR2 events)
+ * 3. RPC fallback (only on startup or cache miss)
  */
 export async function getUsdPrice(symbol: string): Promise<bigint> {
   const normalizedSymbol = symbol.toUpperCase();
 
+  // LAYER 1: Check local price cache first (warmed at startup)
+  const localCached = getLocalCachedPrice(normalizedSymbol, DEFAULT_PRICE_CACHE_TTL_MS);
+  if (localCached !== null) {
+    return localCached; // Zero RPC calls, no ChainlinkListener lookup needed
+  }
+
   // Resolve symbol to feed address
   const feedAddress = chainlinkFeedAddresses.get(normalizedSymbol);
   
-  // CACHE-FIRST: Try to get price from ChainlinkListener cache
+  // LAYER 2: Try to get price from ChainlinkListener cache
   if (feedAddress && chainlinkListenerInstance) {
     const cachedPrice = chainlinkListenerInstance.getCachedPrice(feedAddress);
     if (cachedPrice !== null) {
       return cachedPrice; // Zero RPC calls
     }
-    console.warn(`[priceMath] Cache miss for ${normalizedSymbol}, falling back to RPC`);
+    warnCacheMissOnce(normalizedSymbol, 'direct feed');
   }
   
   // For ratio feeds, check if they have a specific feed
@@ -346,7 +411,7 @@ export async function getUsdPrice(symbol: string): Promise<bigint> {
     return fetchRatioFeedPrice(normalizedSymbol);
   }
 
-  // Fallback: Fetch from RPC (only on startup or cache miss)
+  // LAYER 3: Fallback to RPC (only on startup or cache miss)
   let price: bigint;
 
   // Try Chainlink direct feed
@@ -378,6 +443,11 @@ export async function getUsdPrice(symbol: string): Promise<bigint> {
  * - Direct feeds via address-to-feed mapping
  * - Symbol-based feeds via address→symbol→feed mapping
  * - Ratio feeds (WEETH, WSTETH, CBETH) via cached composition
+ * 
+ * Cache layering:
+ * 1. Local priceCache (via symbol lookup)
+ * 2. ChainlinkListener cache (via feed address)
+ * 3. RPC fallback
  */
 export async function getUsdPriceForAddress(address: string): Promise<bigint> {
   const normalizedAddress = address.toLowerCase();
@@ -385,16 +455,26 @@ export async function getUsdPriceForAddress(address: string): Promise<bigint> {
   // Try address-to-feed mapping first (address-first pricing)
   const feedAddress = addressToFeedMap.get(normalizedAddress);
   if (feedAddress) {
-    // CACHE-FIRST: Get price from ChainlinkListener cache
+    // Try to get symbol for this address to check local cache
+    const symbol = addressToSymbolMap.get(normalizedAddress);
+    if (symbol) {
+      // LAYER 1: Check local price cache
+      const localCached = getLocalCachedPrice(symbol, DEFAULT_PRICE_CACHE_TTL_MS);
+      if (localCached !== null) {
+        return localCached;
+      }
+    }
+    
+    // LAYER 2: Get price from ChainlinkListener cache
     if (chainlinkListenerInstance) {
       const cachedPrice = chainlinkListenerInstance.getCachedPrice(feedAddress);
       if (cachedPrice !== null) {
         return cachedPrice;
       }
-      console.warn(`[priceMath] Cache miss for feed ${feedAddress}, falling back to RPC`);
+      warnCacheMissOnce(`feed:${feedAddress.substring(0, 10)}`, 'address-to-feed');
     }
     
-    // Fallback: Fetch from RPC (only on startup or cache miss)
+    // LAYER 3: Fallback to RPC (only on startup or cache miss)
     const provider = getHttpProvider();
     const feedContract = new ethers.Contract(
       feedAddress,
@@ -425,7 +505,7 @@ export async function getUsdPriceForAddress(address: string): Promise<bigint> {
     throw new Error(`No symbol mapping found for address ${address}. Call initAddressToSymbolMapping() at startup.`);
   }
   
-  // Fetch price using symbol
+  // Fetch price using symbol (which has its own cache layering)
   return getUsdPrice(symbol);
 }
 
