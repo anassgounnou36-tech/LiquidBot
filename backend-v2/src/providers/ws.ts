@@ -25,14 +25,11 @@ function createWsProvider(): WebSocketProvider {
   const provider = new WebSocketProvider(config.WS_RPC_URL);
   
   // Add error handler
+  // Note: ethers v6 WebSocketProvider only supports standard ProviderEvents
+  // ('block', 'error', etc.). The 'close' event is NOT supported and will crash.
+  // Error handling is sufficient as ethers manages WebSocket lifecycle internally.
   provider.on('error', (error: Error) => {
     console.error('[ws] Provider error:', error.message);
-    handleDisconnect();
-  });
-  
-  // Add close handler
-  provider.on('close', () => {
-    console.warn('[ws] Connection closed');
     handleDisconnect();
   });
   
