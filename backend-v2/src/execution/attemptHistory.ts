@@ -3,7 +3,7 @@
 /**
  * Attempt status
  */
-export type AttemptStatus = 'sent' | 'reverted' | 'included' | 'error' | 'skip_no_pair';
+export type AttemptStatus = 'sent' | 'reverted' | 'included' | 'error' | 'skip_no_pair' | 'pending' | 'failed';
 
 /**
  * Attempt record
@@ -13,6 +13,7 @@ export interface AttemptRecord {
   timestamp: number;
   status: AttemptStatus;
   txHash?: string;
+  nonce?: number;
   error?: string;
   debtAsset?: string;
   collateralAsset?: string;
@@ -77,7 +78,9 @@ export class AttemptHistory {
       reverted: 0,
       included: 0,
       error: 0,
-      skip_no_pair: 0
+      skip_no_pair: 0,
+      pending: 0,
+      failed: 0
     };
 
     for (const userHistory of this.history.values()) {
@@ -92,5 +95,23 @@ export class AttemptHistory {
       totalAttempts,
       statusCounts
     };
+  }
+
+  /**
+   * Check if user has a pending attempt
+   * Returns true if last attempt status is 'pending'
+   */
+  hasPending(user: string): boolean {
+    const lastAttempt = this.getLastAttempt(user);
+    return lastAttempt !== null && lastAttempt.status === 'pending';
+  }
+
+  /**
+   * Get pending attempt for a user
+   * Returns the last attempt if it's pending, null otherwise
+   */
+  getPendingAttempt(user: string): AttemptRecord | null {
+    const lastAttempt = this.getLastAttempt(user);
+    return lastAttempt !== null && lastAttempt.status === 'pending' ? lastAttempt : null;
   }
 }

@@ -7,6 +7,20 @@ import { getHttpProvider } from '../providers/rpc.js';
 import { metrics } from '../metrics/metrics.js';
 
 /**
+ * Candidate plan with oracle-based score
+ */
+export interface CandidatePlan {
+  debtAsset: string;
+  collateralAsset: string;
+  debtToCover: bigint; // In debt token units
+  expectedCollateralOut: bigint; // In collateral token units
+  oracleScore: bigint; // Conservative BigInt score based on oracle math (1e18 scale)
+  debtAssetDecimals: number;
+  collateralAssetDecimals: number;
+  liquidationBonusBps: number;
+}
+
+/**
  * Liquidation plan with all amounts in correct token units
  */
 export interface LiquidationPlan {
@@ -29,6 +43,7 @@ interface PairScore {
   debtReserve: UserReserveData;
   collateralReserve: UserReserveData;
   score: number; // Conservative profit in USD with haircut
+  oracleScoreBigInt: bigint; // Conservative profit in 1e18 scale (for CandidatePlan)
   debtUsd1e18: bigint;
   collateralUsd1e18: bigint;
   expectedCollateralOut: bigint;
@@ -50,7 +65,88 @@ export class LiquidationPlanner {
   }
 
   /**
-   * Build a complete liquidation plan for a user
+   * Build candidate plans for a user (up to top N)
+   * Returns up to TOP_N_PAIRS candidates sorted by oracleScore (descending)
+   * Does NOT pick the final winner - that's done by the caller using real swap quotes
+   */
+  async buildCandidatePlans(user: string): Promise<CandidatePlan[]> {
+    const startTime = Date.now();
+    
+    // Get all user reserves
+    const reserves = await this.dataProvider.getAllUserReserves(user);
+    
+    if (reserves.length === 0) {
+      console.warn(`[liquidationPlanner] No reserves found for user ${user}`);
+      return [];
+    }
+
+    // Step 1: Find user's debt positions
+    const debtPositions = reserves.filter(
+      r => r.currentVariableDebt > 0n || r.currentStableDebt > 0n
+    );
+
+    if (debtPositions.length === 0) {
+      console.warn(`[liquidationPlanner] No debt positions for user ${user}`);
+      return [];
+    }
+
+    // Step 2: Find user's collateral positions
+    const collateralPositions = reserves.filter(
+      r => r.usageAsCollateralEnabled && r.currentATokenBalance > 0n
+    );
+
+    if (collateralPositions.length === 0) {
+      console.warn(`[liquidationPlanner] No collateral positions for user ${user}`);
+      return [];
+    }
+
+    // Step 3: Get top N scored pairs
+    const topPairs = await this.selectTopPairs(debtPositions, collateralPositions);
+    
+    if (topPairs.length === 0) {
+      console.warn(`[liquidationPlanner] Could not select any pairs for user ${user}`);
+      return [];
+    }
+
+    // Step 4: Convert to CandidatePlan format
+    const candidates: CandidatePlan[] = [];
+    for (const pair of topPairs) {
+      const debtDecimals = await getTokenDecimals(pair.debtReserve.underlyingAsset);
+      const collateralDecimals = await getTokenDecimals(pair.collateralReserve.underlyingAsset);
+
+      candidates.push({
+        debtAsset: pair.debtReserve.underlyingAsset,
+        collateralAsset: pair.collateralReserve.underlyingAsset,
+        debtToCover: pair.debtToCover,
+        expectedCollateralOut: pair.expectedCollateralOut,
+        oracleScore: pair.oracleScoreBigInt,
+        debtAssetDecimals: debtDecimals,
+        collateralAssetDecimals: collateralDecimals,
+        liquidationBonusBps: pair.liquidationBonusBps
+      });
+    }
+
+    const executionTimeMs = Date.now() - startTime;
+    metrics.recordPlannerTime(executionTimeMs);
+    
+    console.log(
+      `[liquidationPlanner] Built ${candidates.length} candidate plans in ${executionTimeMs}ms for user ${user}`
+    );
+    
+    for (let i = 0; i < candidates.length; i++) {
+      const candidate = candidates[i];
+      console.log(
+        `[liquidationPlanner]   ${i + 1}. Debt: ${candidate.debtAsset.substring(0, 10)}... ` +
+        `Collateral: ${candidate.collateralAsset.substring(0, 10)}... ` +
+        `OracleScore: ${(Number(candidate.oracleScore) / 1e18).toFixed(4)}`
+      );
+    }
+
+    return candidates;
+  }
+
+  /**
+   * Build a complete liquidation plan for a user (legacy method - picks single best)
    * Computes debtToCover and expectedCollateralOut in correct token units
    */
   async buildPlan(user: string): Promise<LiquidationPlan | null> {
@@ -131,6 +227,187 @@ export class LiquidationPlanner {
       profitUsd: score,
       executionTimeMs
     };
+  }
+
+  /**
+   * Select top N debt and collateral pairs by scoring
+   * Returns up to TOP_N_PAIRS pairs sorted by score (descending)
+   */
+  private async selectTopPairs(
+    debtPositions: UserReserveData[],
+    collateralPositions: UserReserveData[]
+  ): Promise<PairScore[]> {
+    const TOP_N_PAIRS = 3; // Return up to top 3 pairs
+    const CONSERVATIVE_HAIRCUT_BPS = 200; // 2% haircut for slippage/fees
+    const CLOSE_FACTOR_BPS = 5000n; // 50%
+    
+    // PHASE 1: ASYNC PREFETCH - Gather all unique addresses
+    const allAddresses = new Set<string>();
+    
+    for (const debtReserve of debtPositions) {
+      allAddresses.add(debtReserve.underlyingAsset.toLowerCase());
+    }
+    
+    for (const collateralReserve of collateralPositions) {
+      allAddresses.add(collateralReserve.underlyingAsset.toLowerCase());
+    }
+    
+    // Prefetch all prices concurrently
+    const pricePromises = Array.from(allAddresses).map(async (address) => {
+      try {
+        const price = await getUsdPriceForAddress(address);
+        return { address, price };
+      } catch (err) {
+        console.warn(`[liquidationPlanner] Failed to fetch price for ${address}:`, err instanceof Error ? err.message : err);
+        return { address, price: null };
+      }
+    });
+    
+    // Prefetch all decimals concurrently
+    const decimalsPromises = Array.from(allAddresses).map(async (address) => {
+      try {
+        const decimals = await getTokenDecimals(address);
+        return { address, decimals };
+      } catch (err) {
+        console.warn(`[liquidationPlanner] Failed to fetch decimals for ${address}:`, err instanceof Error ? err.message : err);
+        return { address, decimals: null };
+      }
+    });
+    
+    // Prefetch all reserve configs concurrently
+    // Use persistent cache to avoid repeated fetches across plans
+    const configPromises = Array.from(allAddresses).map(async (address) => {
+      // Check persistent cache first
+      if (this.reserveConfigCache.has(address)) {
+        return { address, config: this.reserveConfigCache.get(address) };
+      }
+      
+      try {
+        const config = await this.dataProvider.getReserveConfigurationData(address);
+        // Store in persistent cache
+        this.reserveConfigCache.set(address, config);
+        return { address, config };
+      } catch (err) {
+        console.warn(`[liquidationPlanner] Failed to fetch config for ${address}:`, err instanceof Error ? err.message : err);
+        return { address, config: null };
+      }
+    });
+    
+    // Wait for all prefetches
+    const [priceResults, decimalsResults, configResults] = await Promise.all([
+      Promise.all(pricePromises),
+      Promise.all(decimalsPromises),
+      Promise.all(configPromises)
+    ]);
+    
+    // Build caches
+    const priceCache = new Map<string, bigint>();
+    const decimalsCache = new Map<string, number>();
+    const configCache = new Map<string, any>();
+    
+    for (const { address, price } of priceResults) {
+      if (price !== null) {
+        priceCache.set(address, price);
+      }
+    }
+    
+    for (const { address, decimals } of decimalsResults) {
+      if (decimals !== null) {
+        decimalsCache.set(address, decimals);
+      }
+    }
+    
+    for (const { address, config } of configResults) {
+      if (config !== null) {
+        configCache.set(address, config);
+      }
+    }
+    
+    // PHASE 2: SYNC SCORING - Pure BigInt math, no awaits
+    const scoredPairs: PairScore[] = [];
+    
+    for (const debtReserve of debtPositions) {
+      const totalDebt = debtReserve.currentVariableDebt + debtReserve.currentStableDebt;
+      const debtToCover = (totalDebt * CLOSE_FACTOR_BPS) / 10000n;
+      
+      const debtAddress = debtReserve.underlyingAsset.toLowerCase();
+      const debtPriceUsd1e18 = priceCache.get(debtAddress);
+      const debtDecimals = decimalsCache.get(debtAddress);
+      
+      if (!debtPriceUsd1e18 || debtDecimals === undefined) {
+        continue;
+      }
+      
+      const debtUsd1e18 = this.calculateUsdValue(debtToCover, debtDecimals, debtPriceUsd1e18);
+      
+      for (const collateralReserve of collateralPositions) {
+        const collateralAddress = collateralReserve.underlyingAsset.toLowerCase();
+        const collateralPriceUsd1e18 = priceCache.get(collateralAddress);
+        const collateralDecimals = decimalsCache.get(collateralAddress);
+        const collateralConfig = configCache.get(collateralAddress);
+        
+        if (!collateralPriceUsd1e18 || collateralDecimals === undefined || !collateralConfig) {
+          continue;
+        }
+        
+        const liquidationBonusBps = collateralConfig.liquidationBonus > 10000 
+          ? collateralConfig.liquidationBonus - 10000
+          : 500;
+        
+        // Calculate expected collateral out (pure BigInt math)
+        const expectedCollateralOut = this.calculateExpectedCollateral(
+          debtToCover,
+          debtDecimals,
+          debtPriceUsd1e18,
+          collateralDecimals,
+          collateralPriceUsd1e18,
+          liquidationBonusBps
+        );
+        
+        // Check if we have enough collateral
+        if (expectedCollateralOut > collateralReserve.currentATokenBalance) {
+          continue;
+        }
+        
+        // Calculate collateral out USD value (pure BigInt math)
+        const collateralOutUsd1e18 = this.calculateUsdValue(
+          expectedCollateralOut,
+          collateralDecimals,
+          collateralPriceUsd1e18
+        );
+        
+        // Calculate conservative profit with haircut (pure BigInt math)
+        const profitUsd1e18 = collateralOutUsd1e18 - debtUsd1e18;
+        const haircutAmount = (profitUsd1e18 * BigInt(CONSERVATIVE_HAIRCUT_BPS)) / 10000n;
+        const conservativeProfitUsd1e18 = profitUsd1e18 - haircutAmount;
+        
+        // Convert to number for scoring (safe because USD values are small)
+        const score = Number(conservativeProfitUsd1e18) / 1e18;
+        
+        // Only consider profitable pairs
+        if (score > 0) {
+          scoredPairs.push({
+            debtReserve,
+            collateralReserve,
+            score,
+            oracleScoreBigInt: conservativeProfitUsd1e18,
+            debtUsd1e18,
+            collateralUsd1e18: collateralOutUsd1e18,
+            expectedCollateralOut,
+            debtToCover,
+            liquidationBonusBps
+          });
+        }
+      }
+    }
+
+    if (scoredPairs.length === 0) {
+      return [];
+    }
+
+    // Sort by score (descending) and take top N
+    scoredPairs.sort((a, b) => b.score - a.score);
+    return scoredPairs.slice(0, TOP_N_PAIRS);
   }
 
   /**
@@ -299,6 +576,7 @@ export class LiquidationPlanner {
             debtReserve,
             collateralReserve,
             score,
+            oracleScoreBigInt: conservativeProfitUsd1e18,
             debtUsd1e18,
             collateralUsd1e18: collateralOutUsd1e18,
             expectedCollateralOut,

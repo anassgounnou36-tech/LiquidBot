@@ -27,14 +27,16 @@ export interface SwapQuoteResponse {
 export class OneInchSwapBuilder {
   private apiKey?: string;
   private chainId: number;
+  private requestTimeoutMs: number;
 
-  constructor(chainId: number = 8453) {
+  constructor(chainId: number = 8453, requestTimeoutMs: number = 5000) {
     this.chainId = chainId;
     this.apiKey = process.env.ONEINCH_API_KEY;
+    this.requestTimeoutMs = requestTimeoutMs;
   }
 
   /**
-   * Get swap calldata from 1inch API
+   * Get swap calldata from 1inch API with timeout and defensive parsing
    */
   async getSwapCalldata(request: SwapQuoteRequest): Promise<SwapQuoteResponse> {
     const slippageBps = request.slippageBps || 100; // 1% default
@@ -65,22 +67,57 @@ export class OneInchSwapBuilder {
     }
 
     try {
-      const response = await fetch(url, { method: 'GET', headers });
+      // Create abort controller for timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), this.requestTimeoutMs);
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`1inch API error (${response.status}): ${errorText}`);
+      try {
+        const response = await fetch(url, { 
+          method: 'GET', 
+          headers,
+          signal: controller.signal
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`1inch API error (${response.status}): ${errorText}`);
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const data = await response.json() as any;
+
+        // Defensive parsing: ensure required fields exist
+        const to = data.tx?.to || data.to;
+        const txData = data.tx?.data || data.data;
+        const value = data.tx?.value || data.value || '0';
+        const minOut = data.dstAmount || data.toAmount || '0';
+
+        if (!to || !txData) {
+          throw new Error('1inch API response missing required fields (to/data)');
+        }
+
+        if (!minOut || minOut === '0') {
+          throw new Error('1inch API response missing or zero minOut (dstAmount/toAmount)');
+        }
+
+        return {
+          to,
+          data: txData,
+          value,
+          minOut
+        };
+      } catch (err) {
+        clearTimeout(timeoutId);
+        
+        // Check if it's an abort error (timeout)
+        if (err instanceof Error && err.name === 'AbortError') {
+          throw new Error(`1inch API request timeout after ${this.requestTimeoutMs}ms`);
+        }
+        
+        throw err;
       }
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const data = await response.json() as any;
-
-      return {
-        to: data.tx?.to || data.to,
-        data: data.tx?.data || data.data,
-        value: data.tx?.value || data.value || '0',
-        minOut: data.dstAmount || data.toAmount || '0'
-      };
     } catch (err) {
       throw new Error(
         `Failed to get 1inch swap calldata: ${err instanceof Error ? err.message : err}`
