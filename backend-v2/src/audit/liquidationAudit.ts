@@ -6,6 +6,7 @@ import { config } from '../config/index.js';
 import type { TelegramNotifier } from '../notify/TelegramNotifier.js';
 import type { AttemptHistory } from '../execution/attemptHistory.js';
 import type { ActiveRiskSet } from '../risk/ActiveRiskSet.js';
+import { metrics } from '../metrics/metrics.js';
 
 /**
  * Audit reason classification
@@ -156,6 +157,7 @@ export class LiquidationAudit {
       
       // Check if attempt is pending (sent or pending status) - NOT a failure, but late inclusion
       if (lastAttempt.status === 'sent' || lastAttempt.status === 'pending') {
+        metrics.incrementLateInclusionMisses();
         await this.sendAuditNotification(event, 'attempted_pending_late_inclusion', lastDebtUsd, lastHF, lastAttempt.status);
         return;
       }
