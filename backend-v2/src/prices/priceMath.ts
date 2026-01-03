@@ -52,6 +52,14 @@ let chainlinkListenerInstance: ChainlinkListener | null = null;
  */
 export function initChainlinkFeeds(feeds: Record<string, string>): void {
   for (const [symbol, address] of Object.entries(feeds)) {
+    // Validate address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
+      throw new Error(
+        `Invalid Chainlink feed address for ${symbol}: "${address}". ` +
+        `Expected 0x-prefixed 40-character hex address. ` +
+        `ENS names and other formats are not supported.`
+      );
+    }
     chainlinkFeedAddresses.set(symbol.toUpperCase(), address);
   }
   
@@ -71,6 +79,20 @@ export function initChainlinkFeeds(feeds: Record<string, string>): void {
  */
 export function initChainlinkFeedsByAddress(feedsByAddress: Record<string, string>): void {
   for (const [tokenAddress, feedAddress] of Object.entries(feedsByAddress)) {
+    // Validate both token address and feed address format
+    if (!/^0x[a-fA-F0-9]{40}$/.test(tokenAddress)) {
+      throw new Error(
+        `Invalid token address in address-to-feed mapping: "${tokenAddress}". ` +
+        `Expected 0x-prefixed 40-character hex address.`
+      );
+    }
+    if (!/^0x[a-fA-F0-9]{40}$/.test(feedAddress)) {
+      throw new Error(
+        `Invalid feed address for token ${tokenAddress}: "${feedAddress}". ` +
+        `Expected 0x-prefixed 40-character hex address. ` +
+        `ENS names and other formats are not supported.`
+      );
+    }
     addressToFeedMap.set(tokenAddress.toLowerCase(), feedAddress.toLowerCase());
   }
   
@@ -459,4 +481,56 @@ export function getCachedPrice(symbol: string): bigint | null {
  */
 export function clearPriceCache(): void {
   priceCache.clear();
+}
+
+/**
+ * Resolve ETH/USD feed address (aliased to WETH if needed)
+ * Returns the configured feed address or null if not configured
+ * Must be called after initChainlinkFeeds()
+ */
+export function resolveEthUsdFeedAddress(): string | null {
+  // Try ETH first (may be aliased to WETH)
+  const ethFeed = chainlinkFeedAddresses.get('ETH');
+  if (ethFeed) {
+    return ethFeed;
+  }
+  
+  // Fall back to WETH
+  const wethFeed = chainlinkFeedAddresses.get('WETH');
+  if (wethFeed) {
+    return wethFeed;
+  }
+  
+  return null;
+}
+
+/**
+ * Get normalized price from a specific feed address
+ * Fetches latestRoundData() directly and normalizes to 1e18 BigInt
+ * Does NOT use cache or add to cache - for warm-up only
+ * @param feedAddress Chainlink feed contract address
+ * @returns Normalized price as 1e18 BigInt
+ */
+export async function getNormalizedPriceFromFeed(feedAddress: string): Promise<bigint> {
+  const provider = getHttpProvider();
+  const feedContract = new ethers.Contract(
+    feedAddress,
+    ['function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80)'],
+    provider
+  );
+
+  const [, answer] = await feedContract.latestRoundData();
+  const decimals = await getChainlinkDecimals(feedAddress);
+
+  // Normalize to 1e18 using pure BigInt exponentiation
+  const price = BigInt(answer.toString());
+  if (decimals === 18) {
+    return price;
+  } else if (decimals < 18) {
+    const exponent = 18 - decimals;
+    return price * (10n ** BigInt(exponent));
+  } else {
+    const exponent = decimals - 18;
+    return price / (10n ** BigInt(exponent));
+  }
 }
