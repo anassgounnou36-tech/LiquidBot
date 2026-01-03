@@ -15,6 +15,7 @@ export type AuditReason =
   | 'debt_below_min'
   | 'hf_never_crossed_execute'
   | 'attempt_failed_or_late'
+  | 'attempted_pending_late_inclusion'
   | 'priced_out';
 
 /**
@@ -153,14 +154,14 @@ export class LiquidationAudit {
         return;
       }
       
-      // Check if attempt is pending (sent but not mined) - this is NOT a failure
-      if (lastAttempt.status === 'sent') {
-        await this.sendAuditNotification(event, 'attempt_failed_or_late', lastDebtUsd, lastHF, 'pending_late_inclusion');
+      // Check if attempt is pending (sent or pending status) - NOT a failure, but late inclusion
+      if (lastAttempt.status === 'sent' || lastAttempt.status === 'pending') {
+        await this.sendAuditNotification(event, 'attempted_pending_late_inclusion', lastDebtUsd, lastHF, lastAttempt.status);
         return;
       }
       
       // Check if attempt failed or reverted
-      if (lastAttempt.status === 'reverted' || lastAttempt.status === 'error') {
+      if (lastAttempt.status === 'reverted' || lastAttempt.status === 'error' || lastAttempt.status === 'failed') {
         await this.sendAuditNotification(event, 'attempt_failed_or_late', lastDebtUsd, lastHF, lastAttempt.status);
         return;
       }
@@ -217,12 +218,11 @@ export class LiquidationAudit {
       case 'hf_never_crossed_execute':
         reasonText = `📊 HF never crossed execute threshold (${config.HF_THRESHOLD_EXECUTE})`;
         break;
+      case 'attempted_pending_late_inclusion':
+        reasonText = `⏳ We attempted (${attemptStatus || 'pending'}) but competitor liquidated first`;
+        break;
       case 'attempt_failed_or_late':
-        if (attemptStatus === 'pending_late_inclusion') {
-          reasonText = `⏳ We attempted but pending / late inclusion`;
-        } else {
-          reasonText = `🔄 We attempted but ${attemptStatus || 'failed'}`;
-        }
+        reasonText = `🔄 We attempted but ${attemptStatus || 'failed'}`;
         break;
       case 'priced_out':
         reasonText = `💸 Priced out: minOut or safety checks failed`;

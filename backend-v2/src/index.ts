@@ -17,6 +17,8 @@ import { initChainlinkFeeds, initChainlinkFeedsByAddress, initAddressToSymbolMap
 import { LiquidationPlanner } from './execution/liquidationPlanner.js';
 import { ProtocolDataProvider } from './aave/protocolDataProvider.js';
 import { metrics } from './metrics/metrics.js';
+import { computeNetDebtToken } from './execution/safety.js';
+import { ethers } from 'ethers';
 
 // 1inch swap slippage tolerance
 // Should be adjusted based on market conditions and token pair liquidity
@@ -228,13 +230,20 @@ async function main() {
             `[execute] Liquidation opportunity: user=${user} HF=${healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)}`
           );
           
-          // Build liquidation plan with correct token units
-          let plan;
+          // Check if user has a pending attempt - skip if so
+          if (attemptHistory.hasPending(user)) {
+            console.log(`[execute] Skipping user ${user} - pending attempt exists`);
+            metrics.incrementPendingSkippedRechecks();
+            return;
+          }
+          
+          // Build candidate plans (up to 3)
+          let candidates;
           try {
-            plan = await liquidationPlanner.buildPlan(user);
+            candidates = await liquidationPlanner.buildCandidatePlans(user);
           } catch (err) {
             console.error(
-              `[execute] Failed to build liquidation plan for ${user}:`,
+              `[execute] Failed to build liquidation plans for ${user}:`,
               err instanceof Error ? err.message : err
             );
             attemptHistory.record({
@@ -246,8 +255,8 @@ async function main() {
             return;
           }
           
-          if (!plan) {
-            console.warn(`[execute] No liquidation plan available for user=${user}`);
+          if (!candidates || candidates.length === 0) {
+            console.warn(`[execute] No liquidation plans available for user=${user}`);
             attemptHistory.record({
               user,
               timestamp: Date.now(),
@@ -256,58 +265,135 @@ async function main() {
             return;
           }
           
-          console.log(
-            `[execute] Plan: debtAsset=${plan.debtAsset} collateralAsset=${plan.collateralAsset}`
-          );
-          console.log(
-            `[execute] debtToCover=${plan.debtToCover.toString()} (${plan.debtAssetDecimals} decimals)`
-          );
-          console.log(
-            `[execute] expectedCollateralOut=${plan.expectedCollateralOut.toString()} (${plan.collateralAssetDecimals} decimals)`
-          );
-          console.log(
-            `[execute] liquidationBonus=${plan.liquidationBonusBps} BPS (${plan.liquidationBonusBps / 100}%)`
-          );
+          console.log(`[execute] Built ${candidates.length} candidate plans for user=${user}`);
           
           if (!executionEnabled) {
             // DRY RUN mode: log only
-            console.log('[execute] DRY RUN mode - would attempt liquidation with plan above');
+            console.log('[execute] DRY RUN mode - would attempt liquidation with candidates above');
             console.log(`[execute] Set EXECUTION_ENABLED=true to enable real execution`);
             
+            // Record attempt for first candidate
+            const firstCandidate = candidates[0];
             attemptHistory.record({
               user,
               timestamp: Date.now(),
               status: 'sent',
-              debtAsset: plan.debtAsset,
-              collateralAsset: plan.collateralAsset,
-              debtToCover: plan.debtToCover.toString()
+              debtAsset: firstCandidate.debtAsset,
+              collateralAsset: firstCandidate.collateralAsset,
+              debtToCover: firstCandidate.debtToCover.toString()
             });
             return;
           }
           
-          // REAL EXECUTION PATH (guarded by EXECUTION_ENABLED)
+          // REAL EXECUTION PATH: Quote-based candidate selection
           try {
-            // Build 1inch swap calldata using expected collateral out
-            const swapQuote = await oneInchBuilder.getSwapCalldata({
-              fromToken: plan.collateralAsset,
-              toToken: plan.debtAsset,
-              amount: plan.expectedCollateralOut.toString(),
-              fromAddress: executorClient.getAddress(),
-              slippageBps: SWAP_SLIPPAGE_BPS
+            // Quote each candidate and compute netDebtToken
+            const quotedCandidates: Array<{
+              candidate: typeof candidates[0];
+              minOut: bigint;
+              netDebtToken: bigint;
+              swapData: string;
+            }> = [];
+            
+            for (let i = 0; i < candidates.length; i++) {
+              const candidate = candidates[i];
+              
+              try {
+                console.log(
+                  `[execute] Requesting quote for candidate ${i + 1}/${candidates.length}: ` +
+                  `debt=${candidate.debtAsset.substring(0, 10)}... ` +
+                  `collateral=${candidate.collateralAsset.substring(0, 10)}...`
+                );
+                
+                // Request 1inch quote
+                const swapQuote = await oneInchBuilder.getSwapCalldata({
+                  fromToken: candidate.collateralAsset,
+                  toToken: candidate.debtAsset,
+                  amount: candidate.expectedCollateralOut.toString(),
+                  fromAddress: executorClient.getAddress(),
+                  slippageBps: SWAP_SLIPPAGE_BPS
+                });
+                
+                const minOut = BigInt(swapQuote.minOut);
+                const netDebtToken = computeNetDebtToken(minOut, candidate.debtToCover);
+                
+                console.log(
+                  `[execute] Candidate ${i + 1}: oracleScore=${(Number(candidate.oracleScore) / 1e18).toFixed(6)} ` +
+                  `minOut=${minOut.toString()} netDebtToken=${netDebtToken.toString()}`
+                );
+                
+                // Only consider candidates with positive net outcome
+                if (netDebtToken > 0n) {
+                  quotedCandidates.push({
+                    candidate,
+                    minOut,
+                    netDebtToken,
+                    swapData: swapQuote.data
+                  });
+                } else {
+                  console.warn(
+                    `[execute] Candidate ${i + 1} has non-positive netDebtToken (${netDebtToken.toString()}), skipping`
+                  );
+                }
+              } catch (err) {
+                console.warn(
+                  `[execute] Failed to quote candidate ${i + 1}: ${err instanceof Error ? err.message : err}`
+                );
+                // Continue to next candidate
+              }
+            }
+            
+            // If no viable candidates after quoting, abort
+            if (quotedCandidates.length === 0) {
+              console.error(`[execute] All candidates failed quoting or have non-positive netDebtToken`);
+              attemptHistory.record({
+                user,
+                timestamp: Date.now(),
+                status: 'error',
+                error: 'All candidates failed quoting or have non-positive netDebtToken'
+              });
+              return;
+            }
+            
+            // Choose candidate with maximum netDebtToken
+            quotedCandidates.sort((a, b) => {
+              if (a.netDebtToken > b.netDebtToken) return -1;
+              if (a.netDebtToken < b.netDebtToken) return 1;
+              return 0;
             });
             
-            console.log(`[execute] 1inch swap quote obtained: minOut=${swapQuote.minOut}`);
+            const chosen = quotedCandidates[0];
+            console.log(
+              `[execute] ⭐ Chosen candidate: debt=${chosen.candidate.debtAsset.substring(0, 10)}... ` +
+              `collateral=${chosen.candidate.collateralAsset.substring(0, 10)}... ` +
+              `netDebtToken=${chosen.netDebtToken.toString()}`
+            );
+            console.log(
+              `[execute] debtToCover=${chosen.candidate.debtToCover.toString()} (${chosen.candidate.debtAssetDecimals} decimals)`
+            );
+            console.log(
+              `[execute] expectedCollateralOut=${chosen.candidate.expectedCollateralOut.toString()} (${chosen.candidate.collateralAssetDecimals} decimals)`
+            );
+            console.log(
+              `[execute] liquidationBonus=${chosen.candidate.liquidationBonusBps} BPS (${chosen.candidate.liquidationBonusBps / 100}%)`
+            );
             
-            // Execute liquidation with correct amounts and safety checks
+            // Get pending nonce
+            const wallet = new ethers.Wallet(config.EXECUTION_PRIVATE_KEY);
+            const provider = executorClient['provider']; // Access private provider
+            const walletConnected = wallet.connect(provider);
+            const pendingNonce = await walletConnected.getNonce('pending');
+            
+            // Execute liquidation with chosen candidate
             const result = await executorClient.attemptLiquidation({
               user,
-              collateralAsset: plan.collateralAsset,
-              debtAsset: plan.debtAsset,
-              debtToCover: plan.debtToCover,
-              oneInchCalldata: swapQuote.data,
-              minOut: BigInt(swapQuote.minOut),
+              collateralAsset: chosen.candidate.collateralAsset,
+              debtAsset: chosen.candidate.debtAsset,
+              debtToCover: chosen.candidate.debtToCover,
+              oneInchCalldata: chosen.swapData,
+              minOut: chosen.minOut,
               payout: executorClient.getWalletAddress(),
-              expectedCollateralOut: plan.expectedCollateralOut
+              expectedCollateralOut: chosen.candidate.expectedCollateralOut
             });
             
             if (result.status === 'mined') {
@@ -317,32 +403,36 @@ async function main() {
                 timestamp: Date.now(),
                 status: 'included',
                 txHash: result.txHash,
-                debtAsset: plan.debtAsset,
-                collateralAsset: plan.collateralAsset,
-                debtToCover: plan.debtToCover.toString()
+                nonce: pendingNonce,
+                debtAsset: chosen.candidate.debtAsset,
+                collateralAsset: chosen.candidate.collateralAsset,
+                debtToCover: chosen.candidate.debtToCover.toString()
               });
             } else if (result.status === 'pending') {
               console.warn(`[execute] ⏳ Liquidation pending (not mined yet): txHash=${result.txHash}`);
+              metrics.incrementPendingAttempts();
               attemptHistory.record({
                 user,
                 timestamp: Date.now(),
-                status: 'sent',
+                status: 'pending',
                 txHash: result.txHash,
-                debtAsset: plan.debtAsset,
-                collateralAsset: plan.collateralAsset,
-                debtToCover: plan.debtToCover.toString()
+                nonce: pendingNonce,
+                debtAsset: chosen.candidate.debtAsset,
+                collateralAsset: chosen.candidate.collateralAsset,
+                debtToCover: chosen.candidate.debtToCover.toString()
               });
             } else {
               console.error(`[execute] ❌ Liquidation failed: ${result.error}`);
               attemptHistory.record({
                 user,
                 timestamp: Date.now(),
-                status: result.txHash ? 'reverted' : 'error',
+                status: result.txHash ? 'reverted' : 'failed',
                 txHash: result.txHash,
+                nonce: pendingNonce,
                 error: result.error,
-                debtAsset: plan.debtAsset,
-                collateralAsset: plan.collateralAsset,
-                debtToCover: plan.debtToCover.toString()
+                debtAsset: chosen.candidate.debtAsset,
+                collateralAsset: chosen.candidate.collateralAsset,
+                debtToCover: chosen.candidate.debtToCover.toString()
               });
             }
           } catch (err) {
@@ -352,10 +442,7 @@ async function main() {
               user,
               timestamp: Date.now(),
               status: 'error',
-              error: errorMsg,
-              debtAsset: plan.debtAsset,
-              collateralAsset: plan.collateralAsset,
-              debtToCover: plan.debtToCover.toString()
+              error: errorMsg
             });
           }
         }

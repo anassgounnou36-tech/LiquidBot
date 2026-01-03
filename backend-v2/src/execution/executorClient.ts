@@ -3,6 +3,7 @@
 import { ethers } from 'ethers';
 import { getHttpProvider } from '../providers/rpc.js';
 import { TxBroadcaster } from './txBroadcaster.js';
+import { computeMinRequiredOut, FLASHLOAN_FEE_BPS, SAFETY_BUFFER_BPS } from './safety.js';
 
 /**
  * Liquidation parameters matching the exact struct from ExecutionService.ts
@@ -77,9 +78,6 @@ export class ExecutorClient {
    * Uses repayment correctness: minOut must cover debtToCover + fees + buffer
    */
   private performSafetyChecks(params: LiquidationParams): SafetyCheckResult {
-    const FLASHLOAN_FEE_BPS = 9; // 0.09% Aave flashloan fee
-    const SAFETY_BUFFER_BPS = 50; // 0.5% safety margin
-    
     // Check 1: debtToCover must be > 0
     if (params.debtToCover <= 0n) {
       return {
@@ -99,9 +97,9 @@ export class ExecutorClient {
     // Check 3: Repayment correctness - minOut must cover debt + fees + buffer
     // minOut is in debt token units, representing what we get from swapping collateral
     // It must be enough to repay debtToCover + flashloan fee + safety margin
+    const minRequiredOut = computeMinRequiredOut(params.debtToCover, FLASHLOAN_FEE_BPS, SAFETY_BUFFER_BPS);
     const flashloanFee = (params.debtToCover * BigInt(FLASHLOAN_FEE_BPS)) / 10000n;
     const safetyBuffer = (params.debtToCover * BigInt(SAFETY_BUFFER_BPS)) / 10000n;
-    const minRequiredOut = params.debtToCover + flashloanFee + safetyBuffer;
     
     if (params.minOut < minRequiredOut) {
       return {

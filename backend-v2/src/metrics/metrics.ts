@@ -29,6 +29,9 @@ interface PlannerStats {
 export class MetricsCollector {
   private plannerTimings: number[] = [];
   private liquidationMetrics: LiquidationMetrics[] = [];
+  private pendingAttemptsCount = 0;
+  private pendingSkippedRechecksCount = 0;
+  private lateInclusionMissesCount = 0;
   private readonly maxSamples = 1000; // Keep last 1000 samples
 
   /**
@@ -53,6 +56,38 @@ export class MetricsCollector {
     if (this.liquidationMetrics.length > this.maxSamples) {
       this.liquidationMetrics.shift();
     }
+  }
+
+  /**
+   * Increment pending attempts counter
+   */
+  incrementPendingAttempts(): void {
+    this.pendingAttemptsCount++;
+  }
+
+  /**
+   * Increment pending skipped rechecks counter
+   */
+  incrementPendingSkippedRechecks(): void {
+    this.pendingSkippedRechecksCount++;
+  }
+
+  /**
+   * Increment late inclusion misses counter
+   */
+  incrementLateInclusionMisses(): void {
+    this.lateInclusionMissesCount++;
+  }
+
+  /**
+   * Get pending-related metrics
+   */
+  getPendingMetrics() {
+    return {
+      pendingAttempts: this.pendingAttemptsCount,
+      pendingSkippedRechecks: this.pendingSkippedRechecksCount,
+      lateInclusionMisses: this.lateInclusionMissesCount
+    };
   }
 
   /**
@@ -117,6 +152,7 @@ export class MetricsCollector {
   logStats(): void {
     const plannerStats = this.getPlannerStats();
     const liqStats = this.getLiquidationStats();
+    const pendingMetrics = this.getPendingMetrics();
 
     if (plannerStats) {
       console.log('[metrics] Planner Performance:');
@@ -137,6 +173,12 @@ export class MetricsCollector {
       console.log(`  Avg Plan→TxSent: ${liqStats.avgPlanToTxSentMs.toFixed(2)}ms`);
       console.log(`  Avg TxSent→Mined: ${liqStats.avgTxSentToMinedMs.toFixed(2)}ms`);
     }
+
+    // Log pending metrics
+    console.log('[metrics] Pending Execution:');
+    console.log(`  Pending Attempts: ${pendingMetrics.pendingAttempts}`);
+    console.log(`  Pending Skipped Rechecks: ${pendingMetrics.pendingSkippedRechecks}`);
+    console.log(`  Late Inclusion Misses: ${pendingMetrics.lateInclusionMisses}`);
   }
 
   /**
