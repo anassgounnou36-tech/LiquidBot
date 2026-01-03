@@ -59,6 +59,17 @@ const lastMissWarnAt = new Map<string, number>();
 const DEFAULT_PRICE_CACHE_TTL_MS = 5 * 60 * 1000;
 
 /**
+ * Cooldown between cache miss warnings (1 minute)
+ * Prevents excessive log spam for the same symbol
+ */
+const CACHE_MISS_WARN_COOLDOWN_MS = 60 * 1000;
+
+/**
+ * Feed address display length for log messages
+ */
+const FEED_ADDRESS_DISPLAY_LENGTH = 10;
+
+/**
  * Initialize Chainlink feed addresses from config
  * Implements ETH→WETH aliasing for Base network
  */
@@ -234,9 +245,8 @@ function getLocalCachedPrice(symbol: string, ttlMs: number): bigint | null {
 function warnCacheMissOnce(symbol: string, context: string): void {
   const now = Date.now();
   const lastWarn = lastMissWarnAt.get(symbol);
-  const cooldownMs = 60 * 1000; // 1 minute
   
-  if (!lastWarn || (now - lastWarn) > cooldownMs) {
+  if (!lastWarn || (now - lastWarn) > CACHE_MISS_WARN_COOLDOWN_MS) {
     console.warn(`[priceMath] Cache miss for ${symbol} (${context}), falling back to RPC`);
     lastMissWarnAt.set(symbol, now);
   }
@@ -471,7 +481,7 @@ export async function getUsdPriceForAddress(address: string): Promise<bigint> {
       if (cachedPrice !== null) {
         return cachedPrice;
       }
-      warnCacheMissOnce(`feed:${feedAddress.substring(0, 10)}`, 'address-to-feed');
+      warnCacheMissOnce(`feed:${feedAddress.substring(0, FEED_ADDRESS_DISPLAY_LENGTH)}`, 'address-to-feed');
     }
     
     // LAYER 3: Fallback to RPC (only on startup or cache miss)
