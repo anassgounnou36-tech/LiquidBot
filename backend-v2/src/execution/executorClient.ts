@@ -217,4 +217,11 @@ export class ExecutorClient {
   getWalletAddress(): string {
     return this.wallet.address;
   }
+
+  /**
+   * Get pending nonce for the wallet
+   */
+  async getPendingNonce(): Promise<number> {
+    return await this.wallet.getNonce('pending');
+  }
 }

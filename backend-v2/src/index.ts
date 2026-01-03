@@ -18,7 +18,6 @@ import { LiquidationPlanner } from './execution/liquidationPlanner.js';
 import { ProtocolDataProvider } from './aave/protocolDataProvider.js';
 import { metrics } from './metrics/metrics.js';
 import { computeNetDebtToken } from './execution/safety.js';
-import { ethers } from 'ethers';
 
 // 1inch swap slippage tolerance
 // Should be adjusted based on market conditions and token pair liquidity
@@ -378,11 +377,8 @@ async function main() {
               `[execute] liquidationBonus=${chosen.candidate.liquidationBonusBps} BPS (${chosen.candidate.liquidationBonusBps / 100}%)`
             );
             
-            // Get pending nonce
-            const wallet = new ethers.Wallet(config.EXECUTION_PRIVATE_KEY);
-            const provider = executorClient['provider']; // Access private provider
-            const walletConnected = wallet.connect(provider);
-            const pendingNonce = await walletConnected.getNonce('pending');
+            // Get pending nonce before execution
+            const pendingNonce = await executorClient.getPendingNonce();
             
             // Execute liquidation with chosen candidate
             const result = await executorClient.attemptLiquidation({
