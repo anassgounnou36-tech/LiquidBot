@@ -520,6 +520,15 @@ export async function getNormalizedPriceFromFeed(feedAddress: string): Promise<b
   );
 
   const [, answer] = await feedContract.latestRoundData();
+  
+  // Validate answer is positive (Chainlink returns int256)
+  if (answer <= 0n) {
+    throw new Error(
+      `Invalid Chainlink price from feed ${feedAddress}: ${answer.toString()}. ` +
+      `Price must be positive.`
+    );
+  }
+  
   const decimals = await getChainlinkDecimals(feedAddress);
 
   // Normalize to 1e18 using pure BigInt exponentiation

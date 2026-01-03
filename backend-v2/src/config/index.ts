@@ -50,25 +50,27 @@ function validateChainlinkFeeds(config: Env): void {
   
   // Validate CHAINLINK_RATIO_FEEDS_BY_ADDRESS_JSON if present (same structure)
   // Note: This config key doesn't exist in env.ts yet, but we validate for future-proofing
-  const ratioFeeds = (config as any).CHAINLINK_RATIO_FEEDS_BY_ADDRESS_JSON;
-  if (ratioFeeds && typeof ratioFeeds === 'object') {
-    for (const [tokenAddress, feedAddress] of Object.entries(ratioFeeds)) {
-      if (typeof feedAddress !== 'string') continue;
-      if (typeof tokenAddress !== 'string' || !isValidEthereumAddress(tokenAddress)) {
-        throw new Error(
-          `Invalid token address in CHAINLINK_RATIO_FEEDS_BY_ADDRESS_JSON: "${tokenAddress}". ` +
-          `Expected 0x-prefixed 40-character hex address.`
-        );
+  if ('CHAINLINK_RATIO_FEEDS_BY_ADDRESS_JSON' in config) {
+    const ratioFeeds = (config as any).CHAINLINK_RATIO_FEEDS_BY_ADDRESS_JSON;
+    if (ratioFeeds && typeof ratioFeeds === 'object') {
+      for (const [tokenAddress, feedAddress] of Object.entries(ratioFeeds)) {
+        if (typeof feedAddress !== 'string') continue;
+        if (typeof tokenAddress !== 'string' || !isValidEthereumAddress(tokenAddress)) {
+          throw new Error(
+            `Invalid token address in CHAINLINK_RATIO_FEEDS_BY_ADDRESS_JSON: "${tokenAddress}". ` +
+            `Expected 0x-prefixed 40-character hex address.`
+          );
+        }
+        if (!isValidEthereumAddress(feedAddress)) {
+          throw new Error(
+            `Invalid feed address for token ${tokenAddress}: "${feedAddress}". ` +
+            `Expected 0x-prefixed 40-character hex address. ` +
+            `ENS names and other formats are not supported.`
+          );
+        }
       }
-      if (!isValidEthereumAddress(feedAddress)) {
-        throw new Error(
-          `Invalid feed address for token ${tokenAddress}: "${feedAddress}". ` +
-          `Expected 0x-prefixed 40-character hex address. ` +
-          `ENS names and other formats are not supported.`
-        );
-      }
+      console.log(`[config] ✓ Validated ratio feed mappings`);
     }
-    console.log(`[config] ✓ Validated ratio feed mappings`);
   }
 }
 
