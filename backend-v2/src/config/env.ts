@@ -88,6 +88,9 @@ const envSchema = z.object({
   // Live event trace configuration
   LOG_LIVE_EVENTS: z.string().transform(val => val === 'true').default('false'),
   LOG_LIVE_EVENTS_ONLY_WATCHED: z.string().transform(val => val === 'true').default('true'),
+
+  // Dust liquidatable logging (HF < 1.0 but debt < MIN_DEBT_USD)
+  LOG_DUST_LIQUIDATABLE: z.string().transform(val => val === 'true').default('false'),
 });
 
 export type Env = z.infer<typeof envSchema>;

@@ -180,21 +180,55 @@ async function main() {
     const results = await hfChecker.checkBatch(users, 100);
     console.log(`[v2] Checked ${results.length} users`);
     
+    // Compute minimum debt threshold once (same as ActiveRiskSet uses)
+    const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
+    
     // Update risk set with fresh HFs
-    let atRiskCount = 0;
+    let watchedCount = 0;
+    let dustLiquidatableCount = 0;
+    
     for (const result of results) {
       riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18);
       
-      if (result.healthFactor < config.HF_THRESHOLD_START) {
-        atRiskCount++;
+      // Log watched/actionable users (HF < threshold AND debt >= MIN_DEBT_USD)
+      if (result.healthFactor < config.HF_THRESHOLD_START && result.debtUsd1e18 >= minDebtUsd1e18) {
+        watchedCount++;
         const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;
         console.log(
-          `[v2] At-risk user: ${result.address} HF=${result.healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)}`
+          `[v2] Watched user: ${result.address} HF=${result.healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)}`
+        );
+      }
+      
+      // Optional: Log dust liquidatable users (HF < 1.0 but debt < MIN_DEBT_USD)
+      if (config.LOG_DUST_LIQUIDATABLE && result.healthFactor < 1.0 && result.debtUsd1e18 < minDebtUsd1e18) {
+        dustLiquidatableCount++;
+        const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;
+        console.log(
+          `[v2][dust-liq] user=${result.address} HF=${result.healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)} (excluded by MIN_DEBT_USD=${config.MIN_DEBT_USD})`
         );
       }
     }
     
-    console.log(`[v2] Active risk set built: ${atRiskCount} at-risk users\n`);
+    // Derive final counts from actual risk set (not manual counters)
+    const actualWatched = riskSet.getBelowThreshold();
+    const totalStored = riskSet.size();
+    
+    // Find min HF among all stored users
+    let minHF: number | null = null;
+    for (const user of riskSet.getAll()) {
+      if (user.healthFactor < Infinity) {
+        if (minHF === null || user.healthFactor < minHF) {
+          minHF = user.healthFactor;
+        }
+      }
+    }
+    
+    console.log(
+      `[v2] Active risk set built: scanned=${results.length} stored=${totalStored} watched=${actualWatched.length} (minDebt>=$${config.MIN_DEBT_USD})` +
+      (config.LOG_DUST_LIQUIDATABLE ? ` dustLiquidatable=${dustLiquidatableCount}` : ' (dust log disabled)') +
+      (minHF !== null ? ` minHF=${minHF.toFixed(4)}` : '')
+    );
+    console.log();
 
     // 5. Setup realtime triggers and dirty queue
     console.log('[v2] Phase 5: Setting up realtime triggers');
@@ -502,7 +536,7 @@ async function main() {
     console.log('[v2] ============================================');
     console.log('[v2] Backend V2 is running');
     console.log('[v2] Monitoring Base network for liquidations');
-    console.log('[v2] Active risk set: ' + atRiskCount + ' users');
+    console.log('[v2] Watched users: ' + riskSet.getBelowThreshold().length + ' (minDebt>=$' + config.MIN_DEBT_USD + ')');
     console.log('[v2] Press Ctrl+C to stop');
     console.log('[v2] ============================================\n');
 
