@@ -21,9 +21,17 @@ export class ActiveRiskSet {
 
   /**
    * Add or update a user in the risk set
+   * Enforces minimum debt requirement - users below MIN_DEBT_USD are not added
    */
   add(address: string, healthFactor: number, debtUsd1e18: bigint = 0n): void {
     const normalized = address.toLowerCase();
+    
+    // Enforce minimum debt at admission
+    const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
+    if (debtUsd1e18 > 0n && debtUsd1e18 < minDebtUsd1e18) {
+      // Dust position - don't add to risk set
+      return;
+    }
     
     this.candidates.set(normalized, {
       address: normalized,
@@ -45,10 +53,21 @@ export class ActiveRiskSet {
 
   /**
    * Update health factor and debt USD for a user
+   * Enforces minimum debt requirement - removes users that drop below MIN_DEBT_USD
    */
   updateHF(address: string, healthFactor: number, debtUsd1e18: bigint): void {
     const normalized = address.toLowerCase();
     const candidate = this.candidates.get(normalized);
+    
+    // Enforce minimum debt - remove dust positions
+    const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
+    if (debtUsd1e18 < minDebtUsd1e18) {
+      // User dropped below minimum debt - remove from risk set
+      if (candidate) {
+        this.candidates.delete(normalized);
+      }
+      return;
+    }
     
     if (candidate) {
       candidate.healthFactor = healthFactor;

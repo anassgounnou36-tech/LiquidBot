@@ -18,6 +18,8 @@ import { LiquidationPlanner } from './execution/liquidationPlanner.js';
 import { ProtocolDataProvider } from './aave/protocolDataProvider.js';
 import { metrics } from './metrics/metrics.js';
 import { computeNetDebtToken } from './execution/safety.js';
+import { logHeartbeat } from './metrics/blockHeartbeat.js';
+import { getWsProvider } from './providers/ws.js';
 
 // 1inch swap slippage tolerance
 // Should be adjusted based on market conditions and token pair liquidity
@@ -37,10 +39,21 @@ async function main() {
   const notifier = new TelegramNotifier();
   
   try {
+    // Startup cap audit
+    console.log('[v2] ============================================');
+    console.log('[v2] CAPACITY AUDIT');
+    console.log('[v2] ============================================');
+    console.log(`[v2] Universe seeding cap: ${config.UNIVERSE_MAX_CANDIDATES || 10000} (source: ${config.UNIVERSE_MAX_CANDIDATES ? 'UNIVERSE_MAX_CANDIDATES' : 'default'})`);
+    console.log(`[v2] DirtyQueue cap: unbounded (Set-based)`);
+    console.log(`[v2] VerifierLoop batch size: 200`);
+    console.log(`[v2] ActiveRiskSet cap: unbounded (Map-based)`);
+    console.log(`[v2] MIN_DEBT_USD filter: $${config.MIN_DEBT_USD}`);
+    console.log(`[v2] Price cache TTL: ${config.PRICE_CACHE_TTL_MS}ms`);
+    console.log('[v2] ============================================\n');
+    
     // 1. Seed borrower universe from subgraph
     console.log('[v2] Phase 1: Universe seeding from subgraph');
     const users = await seedBorrowerUniverse({
-      maxCandidates: 10000,
       pageSize: 1000,
       politenessDelayMs: 100
     });
@@ -473,7 +486,17 @@ async function main() {
     verifierLoop.start();
     console.log('[v2] Verifier loop started\n');
 
-    // 9. Send startup notification
+    // 9. Setup block heartbeat (if enabled)
+    if (config.LOG_BLOCK_HEARTBEAT) {
+      console.log('[v2] Phase 9: Setting up block heartbeat');
+      const wsProvider = getWsProvider();
+      wsProvider.on('block', (blockNumber: number) => {
+        logHeartbeat(blockNumber, riskSet);
+      });
+      console.log(`[v2] Block heartbeat enabled (every ${config.BLOCK_HEARTBEAT_EVERY_N} block(s))\n`);
+    }
+
+    // 10. Send startup notification
     await notifier.notifyStartup();
 
     console.log('[v2] ============================================');

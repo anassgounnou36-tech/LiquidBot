@@ -95,7 +95,7 @@ export class SubgraphSeeder {
       // Respect max candidates limit
       if (uniqueUsers.length > this.maxCandidates) {
         console.log(
-          `[subgraph-seeder] Limiting to max candidates: ${this.maxCandidates} (found ${uniqueUsers.length})`
+          `[subgraph-seeder] Found ${uniqueUsers.length} unique borrowers; capped to ${this.maxCandidates}`
         );
         return uniqueUsers.slice(0, this.maxCandidates);
       }

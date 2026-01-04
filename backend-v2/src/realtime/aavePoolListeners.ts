@@ -16,6 +16,39 @@ const EVENT_SIGNATURES = {
 };
 
 /**
+ * Log event trace if enabled
+ * @param eventName Event name (Borrow, Repay, Supply, Withdraw)
+ * @param blockNumber Block number
+ * @param txHash Transaction hash
+ * @param user User address
+ * @param reserve Reserve address
+ * @param watched Whether user is in active risk set
+ */
+function logEventTrace(
+  eventName: string,
+  blockNumber: number,
+  txHash: string,
+  user: string,
+  reserve: string,
+  watched: boolean
+): void {
+  // Check if event logging is enabled
+  if (!config.LOG_LIVE_EVENTS) {
+    return;
+  }
+  
+  // Check if we should only log watched users
+  if (config.LOG_LIVE_EVENTS_ONLY_WATCHED && !watched) {
+    return;
+  }
+  
+  console.log(
+    `[event] ${eventName} block=${blockNumber} tx=${txHash.substring(0, 10)}... ` +
+    `user=${user.substring(0, 10)}... reserve=${reserve.substring(0, 10)}... watched=${watched}`
+  );
+}
+
+/**
  * AavePoolListeners manages event subscriptions to Aave Pool
  */
 export class AavePoolListeners {
@@ -50,41 +83,118 @@ export class AavePoolListeners {
     console.log('[aavePool] Starting event listeners...');
 
     // Borrow events
-    const borrowListener = (reserve: string, user: string, onBehalfOf: string) => {
+    const borrowListener = (
+      reserve: string, 
+      user: string, 
+      onBehalfOf: string, 
+      amount: bigint,
+      interestRateMode: number,
+      borrowRate: bigint,
+      referralCode: number,
+      event: ethers.Log
+    ) => {
       const affected = onBehalfOf.toLowerCase();
-      if (this.activeRiskSet.has(affected)) {
+      const watched = this.activeRiskSet.has(affected);
+      
+      if (watched) {
         this.dirtyQueue.markDirty(affected);
       }
+      
+      // Log event trace if enabled
+      logEventTrace(
+        'Borrow',
+        event.blockNumber,
+        event.transactionHash || '0x',
+        affected,
+        reserve,
+        watched
+      );
     };
     this.poolContract.on('Borrow', borrowListener);
     this.listeners.push(() => this.poolContract.off('Borrow', borrowListener));
 
     // Repay events
-    const repayListener = (reserve: string, user: string) => {
+    const repayListener = (
+      reserve: string, 
+      user: string, 
+      repayer: string, 
+      amount: bigint, 
+      useATokens: boolean,
+      event: ethers.Log
+    ) => {
       const affected = user.toLowerCase();
-      if (this.activeRiskSet.has(affected)) {
+      const watched = this.activeRiskSet.has(affected);
+      
+      if (watched) {
         this.dirtyQueue.markDirty(affected);
       }
+      
+      // Log event trace if enabled
+      logEventTrace(
+        'Repay',
+        event.blockNumber,
+        event.transactionHash || '0x',
+        affected,
+        reserve,
+        watched
+      );
     };
     this.poolContract.on('Repay', repayListener);
     this.listeners.push(() => this.poolContract.off('Repay', repayListener));
 
     // Supply events
-    const supplyListener = (reserve: string, user: string, onBehalfOf: string) => {
+    const supplyListener = (
+      reserve: string, 
+      user: string, 
+      onBehalfOf: string, 
+      amount: bigint,
+      referralCode: number,
+      event: ethers.Log
+    ) => {
       const affected = onBehalfOf.toLowerCase();
-      if (this.activeRiskSet.has(affected)) {
+      const watched = this.activeRiskSet.has(affected);
+      
+      if (watched) {
         this.dirtyQueue.markDirty(affected);
       }
+      
+      // Log event trace if enabled
+      logEventTrace(
+        'Supply',
+        event.blockNumber,
+        event.transactionHash || '0x',
+        affected,
+        reserve,
+        watched
+      );
     };
     this.poolContract.on('Supply', supplyListener);
     this.listeners.push(() => this.poolContract.off('Supply', supplyListener));
 
     // Withdraw events
-    const withdrawListener = (reserve: string, user: string) => {
+    const withdrawListener = (
+      reserve: string, 
+      user: string, 
+      to: string, 
+      amount: bigint,
+      event: ethers.Log
+    ) => {
       const affected = user.toLowerCase();
-      if (this.activeRiskSet.has(affected)) {
+      const watched = this.activeRiskSet.has(affected);
+      
+      if (watched) {
         this.dirtyQueue.markDirty(affected);
       }
+      
+      // Log event trace if enabled
+      logEventTrace(
+        'Withdraw',
+        event.blockNumber,
+        event.transactionHash || '0x',
+        affected,
+        reserve,
+        watched
+      );
     };
     this.poolContract.on('Withdraw', withdrawListener);
     this.listeners.push(() => this.poolContract.off('Withdraw', withdrawListener));

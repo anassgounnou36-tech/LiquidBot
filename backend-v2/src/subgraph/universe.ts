@@ -2,6 +2,7 @@
 
 import { SubgraphService } from './SubgraphService.js';
 import { SubgraphSeeder } from './SubgraphSeeder.js';
+import { config } from '../config/index.js';
 
 export interface UniverseSeedOptions {
   maxCandidates?: number;
@@ -18,10 +19,20 @@ export interface UniverseSeedOptions {
 export async function seedBorrowerUniverse(options: UniverseSeedOptions = {}): Promise<string[]> {
   console.log('[universe] Starting borrower universe seeding from subgraph...');
   
+  // Determine effective max candidates: env var overrides passed option
+  const effectiveMaxCandidates = config.UNIVERSE_MAX_CANDIDATES || options.maxCandidates || 10000;
+  const capSource = config.UNIVERSE_MAX_CANDIDATES 
+    ? 'UNIVERSE_MAX_CANDIDATES' 
+    : options.maxCandidates 
+      ? 'passed option' 
+      : 'default';
+  
+  console.log(`[universe] Seeding cap: ${effectiveMaxCandidates} (source: ${capSource})`);
+  
   const subgraphService = new SubgraphService();
   const seeder = new SubgraphSeeder({
     subgraphService,
-    maxCandidates: options.maxCandidates || 10000,
+    maxCandidates: effectiveMaxCandidates,
     pageSize: options.pageSize || 1000,
     politenessDelayMs: options.politenessDelayMs || 100,
   });
