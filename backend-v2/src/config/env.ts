@@ -77,6 +77,8 @@ const envSchema = z.object({
 
   // Universe seeding configuration
   UNIVERSE_MAX_CANDIDATES: z.coerce.number().min(100).optional(),
+  UNIVERSE_PAGE_SIZE: z.coerce.number().min(100).max(5000).optional(),
+  UNIVERSE_POLITENESS_DELAY_MS: z.coerce.number().min(0).max(5000).optional(),
 
   // Watched set configuration
   WATCH_HF_MAX: z.coerce.number().min(1.0).optional(),

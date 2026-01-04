@@ -54,8 +54,9 @@ async function main() {
     // 1. Seed borrower universe from subgraph
     console.log('[v2] Phase 1: Universe seeding from subgraph');
     const users = await seedBorrowerUniverse({
-      pageSize: 1000,
-      politenessDelayMs: 100
+      maxCandidates: config.UNIVERSE_MAX_CANDIDATES,
+      pageSize: config.UNIVERSE_PAGE_SIZE ?? 1000,
+      politenessDelayMs: config.UNIVERSE_POLITENESS_DELAY_MS ?? 100
     });
     
     console.log(`[v2] Universe seeded: ${users.length} users\n`);
