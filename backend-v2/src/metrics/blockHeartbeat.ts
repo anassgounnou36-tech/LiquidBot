@@ -45,13 +45,16 @@ export function logHeartbeat(blockNumber: number, riskSet: ActiveRiskSet): void 
   const allUsers = riskSet.getAll();
   const belowThreshold = riskSet.getBelowThreshold();
   
-  // Find minimum HF among watched users
+  // Find minimum HF among watched (below-threshold) users only
   let minHF: number | null = null;
-  for (const user of allUsers) {
-    if (user.healthFactor < Infinity) {
-      if (minHF === null || user.healthFactor < minHF) {
-        minHF = user.healthFactor;
-      }
+  for (const user of belowThreshold) {
+    const hf = user.healthFactor;
+    
+    // Defensive guard against invalid values
+    if (!Number.isFinite(hf)) continue;
+    
+    if (minHF === null || hf < minHF) {
+      minHF = hf;
     }
   }
   
