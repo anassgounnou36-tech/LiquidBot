@@ -526,6 +526,8 @@ async function main() {
       console.log('[v2] Phase 9: Setting up block heartbeat');
       const wsProvider = getWsProvider();
       wsProvider.on('block', (blockNumber: number) => {
+        const everyN = Math.max(1, config.BLOCK_HEARTBEAT_EVERY_N);
+        if (blockNumber % everyN !== 0) return;
         logHeartbeat(blockNumber, riskSet);
       });
       console.log(`[v2] Block heartbeat enabled (every ${config.BLOCK_HEARTBEAT_EVERY_N} block(s))\n`);

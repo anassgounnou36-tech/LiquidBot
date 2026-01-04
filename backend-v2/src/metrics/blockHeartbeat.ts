@@ -19,8 +19,17 @@ export interface HeartbeatMetrics {
 }
 
 /**
+ * Last known price counters for delta calculation
+ */
+let lastPriceCounters = {
+  listenerHits: 0,
+  localHits: 0,
+  rpcFallbacks: 0,
+};
+
+/**
  * Log block heartbeat with system health metrics
- * Includes: risk set sizes, min HF among watched, price source counters
+ * Includes: risk set sizes, min HF among watched, price source counter deltas
  * 
  * @param blockNumber Current block number
  * @param riskSet Active risk set instance
@@ -28,12 +37,6 @@ export interface HeartbeatMetrics {
 export function logHeartbeat(blockNumber: number, riskSet: ActiveRiskSet): void {
   // Check if heartbeat logging is enabled
   if (!config.LOG_BLOCK_HEARTBEAT) {
-    return;
-  }
-  
-  // Check if we should log this block (every N blocks)
-  const everyN = config.BLOCK_HEARTBEAT_EVERY_N;
-  if (blockNumber % everyN !== 0) {
     return;
   }
   
@@ -51,15 +54,29 @@ export function logHeartbeat(blockNumber: number, riskSet: ActiveRiskSet): void 
     }
   }
   
-  // Get price source counters
-  const priceCounters = getPriceSourceCounters();
+  // Get current price source counters
+  const currentCounters = getPriceSourceCounters();
   
-  // Log heartbeat
+  // Calculate deltas since last heartbeat
+  const deltaCounters = {
+    listenerHits: currentCounters.listenerHits - lastPriceCounters.listenerHits,
+    localHits: currentCounters.localHits - lastPriceCounters.localHits,
+    rpcFallbacks: currentCounters.rpcFallbacks - lastPriceCounters.rpcFallbacks,
+  };
+  
+  // Update last known counters
+  lastPriceCounters = {
+    listenerHits: currentCounters.listenerHits,
+    localHits: currentCounters.localHits,
+    rpcFallbacks: currentCounters.rpcFallbacks,
+  };
+  
+  // Log heartbeat with delta counters
   console.log(
     `[heartbeat] block=${blockNumber} ` +
     `riskSet=${allUsers.length} ` +
     `belowThreshold=${belowThreshold.length} ` +
     `minHF=${minHF !== null ? minHF.toFixed(4) : 'N/A'} ` +
-    `priceHits(listener=${priceCounters.listenerHits},local=${priceCounters.localHits},rpc=${priceCounters.rpcFallbacks})`
+    `priceHits(+listener=${deltaCounters.listenerHits},+local=${deltaCounters.localHits},+rpc=${deltaCounters.rpcFallbacks})`
   );
 }
