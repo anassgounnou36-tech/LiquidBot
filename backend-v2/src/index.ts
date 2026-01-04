@@ -1,6 +1,6 @@
 // index.ts: Main entry point for backend-v2 (v2-realtime-pipeline-clean)
 
-import { seedBorrowerUniverse } from './subgraph/universe.js';
+import { seedBorrowerUniverse, DEFAULT_UNIVERSE_MAX_CANDIDATES } from './subgraph/universe.js';
 import { ActiveRiskSet } from './risk/ActiveRiskSet.js';
 import { HealthFactorChecker } from './risk/HealthFactorChecker.js';
 import { ChainlinkListener } from './prices/ChainlinkListener.js';
@@ -43,7 +43,7 @@ async function main() {
     console.log('[v2] ============================================');
     console.log('[v2] CAPACITY AUDIT');
     console.log('[v2] ============================================');
-    console.log(`[v2] Universe seeding cap: ${config.UNIVERSE_MAX_CANDIDATES || 10000} (source: ${config.UNIVERSE_MAX_CANDIDATES ? 'UNIVERSE_MAX_CANDIDATES' : 'default'})`);
+    console.log(`[v2] Universe seeding cap: ${config.UNIVERSE_MAX_CANDIDATES || DEFAULT_UNIVERSE_MAX_CANDIDATES} (source: ${config.UNIVERSE_MAX_CANDIDATES ? 'UNIVERSE_MAX_CANDIDATES' : 'default'})`);
     console.log(`[v2] DirtyQueue cap: unbounded (Set-based)`);
     console.log(`[v2] VerifierLoop batch size: 200`);
     console.log(`[v2] ActiveRiskSet cap: unbounded (Map-based)`);

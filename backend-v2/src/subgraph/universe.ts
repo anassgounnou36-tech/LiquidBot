@@ -11,6 +11,11 @@ export interface UniverseSeedOptions {
 }
 
 /**
+ * Default maximum candidates for universe seeding
+ */
+export const DEFAULT_UNIVERSE_MAX_CANDIDATES = 10000;
+
+/**
  * Seed the borrower universe from the Aave V3 Base subgraph.
  * This is the PRIMARY source of users for the active risk set.
  * 
@@ -20,7 +25,7 @@ export async function seedBorrowerUniverse(options: UniverseSeedOptions = {}): P
   console.log('[universe] Starting borrower universe seeding from subgraph...');
   
   // Determine effective max candidates: env var overrides passed option
-  const effectiveMaxCandidates = config.UNIVERSE_MAX_CANDIDATES || options.maxCandidates || 10000;
+  const effectiveMaxCandidates = config.UNIVERSE_MAX_CANDIDATES || options.maxCandidates || DEFAULT_UNIVERSE_MAX_CANDIDATES;
   const capSource = config.UNIVERSE_MAX_CANDIDATES 
     ? 'UNIVERSE_MAX_CANDIDATES' 
     : options.maxCandidates 

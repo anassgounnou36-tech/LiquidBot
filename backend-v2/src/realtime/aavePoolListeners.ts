@@ -16,6 +16,13 @@ const EVENT_SIGNATURES = {
 };
 
 /**
+ * Truncate address for logging
+ */
+function truncateAddress(address: string): string {
+  return address.substring(0, 10) + '...';
+}
+
+/**
  * Log event trace if enabled
  * @param eventName Event name (Borrow, Repay, Supply, Withdraw)
  * @param blockNumber Block number
@@ -43,8 +50,8 @@ function logEventTrace(
   }
   
   console.log(
-    `[event] ${eventName} block=${blockNumber} tx=${txHash.substring(0, 10)}... ` +
-    `user=${user.substring(0, 10)}... reserve=${reserve.substring(0, 10)}... watched=${watched}`
+    `[event] ${eventName} block=${blockNumber} tx=${truncateAddress(txHash)} ` +
+    `user=${truncateAddress(user)} reserve=${truncateAddress(reserve)} watched=${watched}`
   );
 }
 

@@ -20,6 +20,13 @@ export class ActiveRiskSet {
   private candidates: Map<string, CandidateUser> = new Map();
 
   /**
+   * Get minimum debt threshold as 1e18-scaled BigInt
+   */
+  private getMinDebtThreshold(): bigint {
+    return BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
+  }
+
+  /**
    * Add or update a user in the risk set
    * Enforces minimum debt requirement - users below MIN_DEBT_USD are not added
    */
@@ -27,7 +34,7 @@ export class ActiveRiskSet {
     const normalized = address.toLowerCase();
     
     // Enforce minimum debt at admission
-    const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
+    const minDebtUsd1e18 = this.getMinDebtThreshold();
     if (debtUsd1e18 > 0n && debtUsd1e18 < minDebtUsd1e18) {
       // Dust position - don't add to risk set
       return;
@@ -60,7 +67,7 @@ export class ActiveRiskSet {
     const candidate = this.candidates.get(normalized);
     
     // Enforce minimum debt - remove dust positions
-    const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
+    const minDebtUsd1e18 = this.getMinDebtThreshold();
     if (debtUsd1e18 < minDebtUsd1e18) {
       // User dropped below minimum debt - remove from risk set
       if (candidate) {
@@ -90,7 +97,7 @@ export class ActiveRiskSet {
    */
   getBelowThreshold(): CandidateUser[] {
     const threshold = config.HF_THRESHOLD_START;
-    const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
+    const minDebtUsd1e18 = this.getMinDebtThreshold();
     
     return Array.from(this.candidates.values())
       .filter(c => c.healthFactor < threshold && c.lastDebtUsd1e18 >= minDebtUsd1e18);
@@ -103,7 +110,7 @@ export class ActiveRiskSet {
     const candidate = this.get(address);
     if (!candidate) return false;
     
-    const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
+    const minDebtUsd1e18 = this.getMinDebtThreshold();
     
     // Remove if debt is too low OR HF is safely above threshold
     return candidate.lastDebtUsd1e18 < minDebtUsd1e18 || candidate.healthFactor > REMOVAL_HF_MARGIN;
