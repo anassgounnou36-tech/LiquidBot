@@ -71,6 +71,28 @@ const envSchema = z.object({
   PYTH_ASSETS: commaSeparatedString.default('WETH,USDC,WBTC'),
   PYTH_STALE_SECS: z.coerce.number().min(10).default(60),
   PYTH_FEED_IDS_JSON: optionalJsonString(z.record(z.string(), z.string())),
+
+  // Price cache configuration
+  PRICE_CACHE_TTL_MS: z.coerce.number().min(1000).max(60000).default(8000),
+
+  // Universe seeding configuration
+  UNIVERSE_MAX_CANDIDATES: z.coerce.number().min(100).optional(),
+  UNIVERSE_PAGE_SIZE: z.coerce.number().min(100).max(5000).optional(),
+  UNIVERSE_POLITENESS_DELAY_MS: z.coerce.number().min(0).max(5000).optional(),
+
+  // Watched set configuration
+  WATCH_HF_MAX: z.coerce.number().min(1.0).optional(),
+
+  // Block heartbeat configuration
+  LOG_BLOCK_HEARTBEAT: z.string().transform(val => val === 'true').default('false'),
+  BLOCK_HEARTBEAT_EVERY_N: z.coerce.number().min(1).default(1),
+
+  // Live event trace configuration
+  LOG_LIVE_EVENTS: z.string().transform(val => val === 'true').default('false'),
+  LOG_LIVE_EVENTS_ONLY_WATCHED: z.string().transform(val => val === 'true').default('true'),
+
+  // Dust liquidatable logging (HF < 1.0 but debt < MIN_DEBT_USD)
+  LOG_DUST_LIQUIDATABLE: z.string().transform(val => val === 'true').default('false'),
 });
 
 export type Env = z.infer<typeof envSchema>;

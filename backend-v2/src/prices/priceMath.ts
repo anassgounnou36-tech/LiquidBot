@@ -2,6 +2,7 @@
 
 import { ethers } from 'ethers';
 import { getHttpProvider } from '../providers/rpc.js';
+import { config } from '../config/index.js';
 import type { ChainlinkListener } from './ChainlinkListener.js';
 
 /**
@@ -53,16 +54,19 @@ let chainlinkListenerInstance: ChainlinkListener | null = null;
 const lastMissWarnAt = new Map<string, number>();
 
 /**
- * Default TTL for local price cache (5 minutes)
- * Prices older than this are considered stale
- */
-const DEFAULT_PRICE_CACHE_TTL_MS = 5 * 60 * 1000;
-
-/**
- * Cooldown between cache miss warnings (1 minute)
+ * Cooldown between cache miss warnings (15 seconds)
  * Prevents excessive log spam for the same symbol
  */
-const CACHE_MISS_WARN_COOLDOWN_MS = 60 * 1000;
+const CACHE_MISS_WARN_COOLDOWN_MS = 15000;
+
+/**
+ * Price source counters for heartbeat metrics
+ */
+const priceSourceCounters = {
+  listenerHits: 0,
+  localHits: 0,
+  rpcFallbacks: 0,
+};
 
 /**
  * Feed address display length for log messages
@@ -238,11 +242,11 @@ function getLocalCachedPrice(symbol: string, ttlMs: number): bigint | null {
 
 /**
  * Log cache miss warning with cooldown to prevent spam
- * Only warns once per symbol per minute
+ * Only warns once per symbol per 15 seconds (down from 60s)
  * @param symbol Asset symbol
  * @param context Additional context (e.g., "direct feed", "ratio feed")
  */
-function warnCacheMissOnce(symbol: string, context: string): void {
+function warnOncePerSymbol(symbol: string, context: string): void {
   const now = Date.now();
   const lastWarn = lastMissWarnAt.get(symbol);
   
@@ -320,7 +324,8 @@ async function fetchRatioFeedPrice(symbol: string): Promise<bigint> {
 
   // If either is missing, fall back to RPC
   if (ratio === null) {
-    warnCacheMissOnce(`${symbol}_ETH`, 'ratio feed');
+    warnOncePerSymbol(`${symbol}_ETH`, 'ratio feed');
+    priceSourceCounters.rpcFallbacks++;
     const provider = getHttpProvider();
     const ratioFeedContract = new ethers.Contract(
       ethRatioFeedAddress,
@@ -343,7 +348,8 @@ async function fetchRatioFeedPrice(symbol: string): Promise<bigint> {
   }
 
   if (ethUsdPrice === null) {
-    warnCacheMissOnce('ETH', 'ratio composition');
+    warnOncePerSymbol('ETH', 'ratio composition');
+    priceSourceCounters.rpcFallbacks++;
     ethUsdPrice = await fetchChainlinkPrice('ETH');
   }
 
@@ -397,8 +403,9 @@ export async function getUsdPrice(symbol: string): Promise<bigint> {
   const normalizedSymbol = symbol.toUpperCase();
 
   // LAYER 1: Check local price cache first (warmed at startup)
-  const localCached = getLocalCachedPrice(normalizedSymbol, DEFAULT_PRICE_CACHE_TTL_MS);
+  const localCached = getLocalCachedPrice(normalizedSymbol, config.PRICE_CACHE_TTL_MS);
   if (localCached !== null) {
+    priceSourceCounters.localHits++;
     return localCached; // Zero RPC calls, no ChainlinkListener lookup needed
   }
 
@@ -409,9 +416,11 @@ export async function getUsdPrice(symbol: string): Promise<bigint> {
   if (feedAddress && chainlinkListenerInstance) {
     const cachedPrice = chainlinkListenerInstance.getCachedPrice(feedAddress);
     if (cachedPrice !== null) {
+      priceSourceCounters.listenerHits++;
       return cachedPrice; // Zero RPC calls
     }
-    warnCacheMissOnce(normalizedSymbol, 'direct feed');
+    warnOncePerSymbol(normalizedSymbol, 'direct feed');
+    priceSourceCounters.rpcFallbacks++;
   }
   
   // For ratio feeds, check if they have a specific feed
@@ -469,8 +478,9 @@ export async function getUsdPriceForAddress(address: string): Promise<bigint> {
     const symbol = addressToSymbolMap.get(normalizedAddress);
     if (symbol) {
       // LAYER 1: Check local price cache
-      const localCached = getLocalCachedPrice(symbol, DEFAULT_PRICE_CACHE_TTL_MS);
+      const localCached = getLocalCachedPrice(symbol, config.PRICE_CACHE_TTL_MS);
       if (localCached !== null) {
+        priceSourceCounters.localHits++;
         return localCached;
       }
     }
@@ -479,9 +489,11 @@ export async function getUsdPriceForAddress(address: string): Promise<bigint> {
     if (chainlinkListenerInstance) {
       const cachedPrice = chainlinkListenerInstance.getCachedPrice(feedAddress);
       if (cachedPrice !== null) {
+        priceSourceCounters.listenerHits++;
         return cachedPrice;
       }
-      warnCacheMissOnce(`feed:${feedAddress.substring(0, FEED_ADDRESS_DISPLAY_LENGTH)}`, 'address-to-feed');
+      warnOncePerSymbol(`feed:${feedAddress.substring(0, FEED_ADDRESS_DISPLAY_LENGTH)}`, 'address-to-feed');
+      priceSourceCounters.rpcFallbacks++;
     }
     
     // LAYER 3: Fallback to RPC (only on startup or cache miss)
@@ -632,4 +644,16 @@ export async function getNormalizedPriceFromFeed(feedAddress: string): Promise<b
     const exponent = decimals - 18;
     return price / (10n ** BigInt(exponent));
   }
+}
+
+/**
+ * Get price source counters for heartbeat metrics
+ * Returns snapshot of current counter values
+ */
+export function getPriceSourceCounters() {
+  return {
+    listenerHits: priceSourceCounters.listenerHits,
+    localHits: priceSourceCounters.localHits,
+    rpcFallbacks: priceSourceCounters.rpcFallbacks,
+  };
 }
