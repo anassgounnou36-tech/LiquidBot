@@ -136,4 +136,106 @@ describe('PriceMath BigInt Logic', () => {
       expect(feeds.get('ETH')).toBe(feeds.get('WETH'));
     });
   });
+
+  describe('Cache layering and TTL', () => {
+    it('should demonstrate local cache with TTL logic', () => {
+      // Simulate priceCache structure
+      const priceCache = new Map<string, { price: bigint; timestamp: number }>();
+      
+      // Set a fresh price
+      const now = Date.now();
+      priceCache.set('ETH', { price: 3000n * 10n ** 18n, timestamp: now });
+      
+      // Check if price is fresh (within TTL)
+      const ttlMs = 5 * 60 * 1000; // 5 minutes
+      const cached = priceCache.get('ETH');
+      
+      expect(cached).toBeDefined();
+      expect(cached!.price).toBe(3000000000000000000000n);
+      
+      const age = Date.now() - cached!.timestamp;
+      expect(age).toBeLessThan(ttlMs);
+    });
+
+    it('should demonstrate stale cache detection', () => {
+      const priceCache = new Map<string, { price: bigint; timestamp: number }>();
+      
+      // Set a stale price (10 minutes ago)
+      const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
+      priceCache.set('ETH', { price: 3000n * 10n ** 18n, timestamp: tenMinutesAgo });
+      
+      const ttlMs = 5 * 60 * 1000; // 5 minutes
+      const cached = priceCache.get('ETH');
+      
+      expect(cached).toBeDefined();
+      
+      const age = Date.now() - cached!.timestamp;
+      expect(age).toBeGreaterThan(ttlMs);
+      
+      // Price should be considered stale
+      const isStale = age > ttlMs;
+      expect(isStale).toBe(true);
+    });
+
+    it('should demonstrate warn-once cooldown logic', () => {
+      const lastMissWarnAt = new Map<string, number>();
+      const cooldownMs = 60 * 1000; // 1 minute
+      
+      // First warning
+      const symbol = 'ETH';
+      const now1 = Date.now();
+      lastMissWarnAt.set(symbol, now1);
+      
+      // Check if should warn again immediately (should not)
+      const lastWarn = lastMissWarnAt.get(symbol);
+      expect(lastWarn).toBe(now1);
+      
+      const shouldWarnAgain = !lastWarn || (Date.now() - lastWarn) > cooldownMs;
+      expect(shouldWarnAgain).toBe(false);
+      
+      // Simulate time passing (over 1 minute)
+      const now2 = now1 + (61 * 1000);
+      const shouldWarnAfterCooldown = !lastWarn || (now2 - lastWarn) > cooldownMs;
+      expect(shouldWarnAfterCooldown).toBe(true);
+    });
+
+    it('should demonstrate three-layer cache priority', () => {
+      // Layer 1: Local priceCache (fastest, warmed at startup)
+      const priceCache = new Map<string, { price: bigint; timestamp: number }>();
+      priceCache.set('ETH', { price: 3000n * 10n ** 18n, timestamp: Date.now() });
+      
+      // Layer 2: ChainlinkListener cache (updated by OCR2 events)
+      const chainlinkCache = new Map<string, bigint>();
+      chainlinkCache.set('0xfeed', 3001n * 10n ** 18n);
+      
+      // Layer 3: RPC fallback (only if both caches miss)
+      const rpcPrice = 3002n * 10n ** 18n;
+      
+      // Priority check simulation
+      let finalPrice: bigint | null = null;
+      
+      // Check Layer 1 first
+      const localCached = priceCache.get('ETH');
+      if (localCached) {
+        const age = Date.now() - localCached.timestamp;
+        const ttlMs = 5 * 60 * 1000;
+        if (age <= ttlMs) {
+          finalPrice = localCached.price;
+        }
+      }
+      
+      // If Layer 1 missed, check Layer 2
+      if (finalPrice === null) {
+        finalPrice = chainlinkCache.get('0xfeed') || null;
+      }
+      
+      // If Layer 2 missed, use Layer 3 (RPC)
+      if (finalPrice === null) {
+        finalPrice = rpcPrice;
+      }
+      
+      // Should use Layer 1 (local cache)
+      expect(finalPrice).toBe(3000000000000000000000n);
+    });
+  });
 });
