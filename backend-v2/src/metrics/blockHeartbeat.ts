@@ -20,12 +20,13 @@ export interface HeartbeatMetrics {
 
 /**
  * Last known price counters for delta calculation
+ * Initialized to null to detect first heartbeat
  */
-let lastPriceCounters = {
-  listenerHits: 0,
-  localHits: 0,
-  rpcFallbacks: 0,
-};
+let lastPriceCounters: {
+  listenerHits: number;
+  localHits: number;
+  rpcFallbacks: number;
+} | null = null;
 
 /**
  * Log block heartbeat with system health metrics
@@ -56,6 +57,25 @@ export function logHeartbeat(blockNumber: number, riskSet: ActiveRiskSet): void 
   
   // Get current price source counters
   const currentCounters = getPriceSourceCounters();
+  
+  // First heartbeat: initialize baseline without showing startup accumulation
+  if (lastPriceCounters === null) {
+    lastPriceCounters = {
+      listenerHits: currentCounters.listenerHits,
+      localHits: currentCounters.localHits,
+      rpcFallbacks: currentCounters.rpcFallbacks,
+    };
+    
+    // Log heartbeat with zeros to establish baseline
+    console.log(
+      `[heartbeat] block=${blockNumber} ` +
+      `riskSet=${allUsers.length} ` +
+      `belowThreshold=${belowThreshold.length} ` +
+      `minHF=${minHF !== null ? minHF.toFixed(4) : 'N/A'} ` +
+      `priceHits(+listener=0,+local=0,+rpc=0)`
+    );
+    return;
+  }
   
   // Calculate deltas since last heartbeat
   const deltaCounters = {
