@@ -9,6 +9,12 @@ const CHAINLINK_AGG_ABI = [
   'event NewTransmission(uint32 indexed aggregatorRoundId, int192 answer, address transmitter, int192[] observations, bytes observers, bytes32 rawReportContext)'
 ];
 
+// Chainlink AggregatorV3 ABI (for reading latest price at startup)
+const AGG_V3_ABI = [
+  'function latestRoundData() view returns (uint80,int256,uint256,uint256,uint80)',
+  'function decimals() view returns (uint8)'
+];
+
 export interface ChainlinkPriceUpdate {
   symbol: string;
   feedAddress: string;
@@ -42,22 +48,47 @@ export class ChainlinkListener {
     const normalizedAddress = feedAddress.toLowerCase();
     this.feeds.set(symbol, normalizedAddress);
     
-    // Query and cache decimals for this feed
+    // Query and cache decimals for this feed, then seed initial price
     try {
       const provider = getWsProvider();
       const feedContract = new Contract(
         feedAddress,
-        ['function decimals() external view returns (uint8)'],
+        AGG_V3_ABI,
         provider
       );
       
-      const decimals = await feedContract.decimals();
-      this.decimalsCache.set(normalizedAddress, Number(decimals));
+      // Fetch decimals (ethers v6 returns BigInt, convert to number for arithmetic)
+      const decimalsRaw = await feedContract.decimals();
+      const decimals = Number(decimalsRaw);
+      this.decimalsCache.set(normalizedAddress, decimals);
       
-      console.log(`[chainlink] Added feed: ${symbol} -> ${feedAddress} (decimals=${decimals})`);
+      // Fetch latest price to seed cache
+      const [, answer] = await feedContract.latestRoundData();
+      const rawAnswer = BigInt(answer.toString());
+      
+      // Sanity check: Chainlink prices should never be <= 0
+      if (rawAnswer <= 0n) {
+        console.warn(`[chainlink] Invalid price for ${symbol} (${feedAddress}): ${rawAnswer.toString()}. Skipping cache seed.`);
+        return;
+      }
+      
+      // Normalize answer to 1e18 BigInt using cached decimals
+      let normalizedAnswer: bigint;
+      if (decimals === 18) {
+        normalizedAnswer = rawAnswer;
+      } else if (decimals < 18) {
+        normalizedAnswer = rawAnswer * (10n ** BigInt(18 - decimals));
+      } else {
+        normalizedAnswer = rawAnswer / (10n ** BigInt(decimals - 18));
+      }
+      
+      // Store in cache (same map used by getCachedPrice)
+      this.latestPrice1e18.set(normalizedAddress, normalizedAnswer);
+      
+      console.log(`[chainlink] Warmed feed: ${symbol} -> ${feedAddress} price=${normalizedAnswer.toString()} (1e18, decimals=${decimals})`);
     } catch (err) {
-      console.error(`[chainlink] Failed to query decimals for ${symbol} (${feedAddress}):`, err);
-      throw err;
+      console.error(`[chainlink] Failed to warm feed ${symbol} (${feedAddress}):`, err);
+      // Do NOT throw - continue startup and allow RPC fallback or OCR2 events to populate cache later
     }
   }
 

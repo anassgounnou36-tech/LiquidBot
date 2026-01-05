@@ -88,7 +88,27 @@ export class HealthFactorChecker {
           const healthFactorRaw = decoded[5];
           
           // Convert HF from ray (18 decimals) to float (for logging only)
-          const healthFactor = Number(healthFactorRaw) / 1e18;
+          // CRITICAL: Sanitize edge cases to avoid false minHF=0.0000
+          let healthFactor: number;
+          
+          if (totalDebtBase === 0n) {
+            // No debt: HF is effectively infinite (user cannot be liquidated)
+            healthFactor = Number.POSITIVE_INFINITY;
+          } else if (healthFactorRaw === 0n) {
+            if (totalCollateralBase === 0n) {
+              // No collateral + has debt → real HF=0 (liquidatable)
+              healthFactor = 0;
+            } else {
+              // Collateral > 0 but HF=0 is extremely suspicious
+              // This is almost certainly a decode / edge-case bug
+              // Do NOT poison risk set or heartbeat with fake HF=0
+              // Skip this user entirely (continue to next user)
+              continue;
+            }
+          } else {
+            // Normal case: convert HF from ray (1e18) to float
+            healthFactor = Number(healthFactorRaw) / 1e18;
+          }
           
           // Calculate debtUsd1e18 from totalDebtBase correctly based on base currency
           let debtUsd1e18: bigint;

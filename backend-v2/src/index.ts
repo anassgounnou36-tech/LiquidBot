@@ -145,8 +145,8 @@ async function main() {
     
     console.log('[v2] Price oracles configured (Chainlink only)');
     
-    // Warm up ETH/WETH price cache before HF scan to avoid cache misses
-    console.log('[v2] Warming up ETH/WETH price cache...');
+    // Ensure ETH/WETH price is ready before Phase 4 scan to avoid cache misses
+    console.log('[v2] Ensuring ETH/WETH price readiness...');
     const ethFeedAddress = resolveEthUsdFeedAddress();
     if (!ethFeedAddress) {
       throw new Error(
@@ -155,20 +155,32 @@ async function main() {
       );
     }
     
-    try {
-      const ethPrice = await getNormalizedPriceFromFeed(ethFeedAddress);
+    // Check if ETH price is already cached from warmup
+    let ethPrice = chainlinkListener.getCachedPrice(ethFeedAddress);
+    
+    if (ethPrice === null) {
+      // Cache miss - fetch once via RPC to ensure deterministic readiness
+      console.log('[v2] ETH cache miss after warmup, fetching via RPC...');
+      try {
+        ethPrice = await getNormalizedPriceFromFeed(ethFeedAddress);
+        updateCachedPrice('ETH', ethPrice);
+        updateCachedPrice('WETH', ethPrice); // Also cache as WETH for aliasing
+        console.log(`[v2] ETH/WETH price fetched: ${ethPrice.toString()} (1e18)`);
+      } catch (err) {
+        throw new Error(
+          `Fatal: Failed to fetch ETH/WETH price from feed ${ethFeedAddress}: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      }
+    } else {
+      // Cache hit - ETH already warmed from listener
       updateCachedPrice('ETH', ethPrice);
       updateCachedPrice('WETH', ethPrice); // Also cache as WETH for aliasing
-      console.log(`[v2] ETH/WETH price warmed: ${ethPrice.toString()} (1e18)`);
-    } catch (err) {
-      throw new Error(
-        `Fatal: Failed to warm up ETH/WETH price from feed ${ethFeedAddress}: ${
-          err instanceof Error ? err.message : String(err)
-        }`
-      );
+      console.log(`[v2] ETH/WETH price ready from cache: ${ethPrice.toString()} (1e18)`);
     }
     
-    console.log('[v2] Price cache warm-up complete\n');
+    console.log('[v2] ETH/WETH price readiness confirmed\n');
 
     // 4. Build initial active risk set with on-chain HF checks
     console.log('[v2] Phase 4: Building active risk set');
