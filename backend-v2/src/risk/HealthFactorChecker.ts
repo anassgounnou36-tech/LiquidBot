@@ -93,10 +93,18 @@ export class HealthFactorChecker {
           
           if (totalDebtBase === 0n) {
             // No debt: HF is effectively infinite (user cannot be liquidated)
-            healthFactor = Infinity;
+            healthFactor = Number.POSITIVE_INFINITY;
           } else if (healthFactorRaw === 0n) {
-            // Invalid/edge-case HF: treat as Infinity (user with collateral but zero calculated HF)
-            healthFactor = Infinity;
+            if (totalCollateralBase === 0n) {
+              // No collateral + has debt → real HF=0 (liquidatable)
+              healthFactor = 0;
+            } else {
+              // Collateral > 0 but HF=0 is extremely suspicious
+              // This is almost certainly a decode / edge-case bug
+              // Do NOT poison risk set or heartbeat with fake HF=0
+              // Skip this user entirely (continue to next user)
+              continue;
+            }
           } else {
             // Normal case: convert HF from ray (1e18) to float
             healthFactor = Number(healthFactorRaw) / 1e18;

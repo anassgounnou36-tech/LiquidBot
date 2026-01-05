@@ -57,24 +57,29 @@ export class ChainlinkListener {
         provider
       );
       
-      // Fetch decimals
-      const decimals = await feedContract.decimals();
-      this.decimalsCache.set(normalizedAddress, Number(decimals));
+      // Fetch decimals (ethers v6 returns BigInt, convert to number for arithmetic)
+      const decimalsRaw = await feedContract.decimals();
+      const decimals = Number(decimalsRaw);
+      this.decimalsCache.set(normalizedAddress, decimals);
       
       // Fetch latest price to seed cache
       const [, answer] = await feedContract.latestRoundData();
       const rawAnswer = BigInt(answer.toString());
+      
+      // Sanity check: Chainlink prices should never be <= 0
+      if (rawAnswer <= 0n) {
+        console.warn(`[chainlink] Invalid price for ${symbol} (${feedAddress}): ${rawAnswer.toString()}. Skipping cache seed.`);
+        return;
+      }
       
       // Normalize answer to 1e18 BigInt using cached decimals
       let normalizedAnswer: bigint;
       if (decimals === 18) {
         normalizedAnswer = rawAnswer;
       } else if (decimals < 18) {
-        const exponent = 18 - decimals;
-        normalizedAnswer = rawAnswer * (10n ** BigInt(exponent));
+        normalizedAnswer = rawAnswer * (10n ** BigInt(18 - decimals));
       } else {
-        const exponent = decimals - 18;
-        normalizedAnswer = rawAnswer / (10n ** BigInt(exponent));
+        normalizedAnswer = rawAnswer / (10n ** BigInt(decimals - 18));
       }
       
       // Store in cache (same map used by getCachedPrice)
