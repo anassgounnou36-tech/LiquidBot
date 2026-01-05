@@ -9,6 +9,12 @@ const CHAINLINK_AGG_ABI = [
   'event NewTransmission(uint32 indexed aggregatorRoundId, int192 answer, address transmitter, int192[] observations, bytes observers, bytes32 rawReportContext)'
 ];
 
+// Chainlink AggregatorV3 ABI (for reading latest price at startup)
+const AGG_V3_ABI = [
+  'function latestRoundData() view returns (uint80,int256,uint256,uint256,uint80)',
+  'function decimals() view returns (uint8)'
+];
+
 export interface ChainlinkPriceUpdate {
   symbol: string;
   feedAddress: string;
@@ -42,21 +48,41 @@ export class ChainlinkListener {
     const normalizedAddress = feedAddress.toLowerCase();
     this.feeds.set(symbol, normalizedAddress);
     
-    // Query and cache decimals for this feed
+    // Query and cache decimals for this feed, then seed initial price
     try {
       const provider = getWsProvider();
       const feedContract = new Contract(
         feedAddress,
-        ['function decimals() external view returns (uint8)'],
+        AGG_V3_ABI,
         provider
       );
       
+      // Fetch decimals
       const decimals = await feedContract.decimals();
       this.decimalsCache.set(normalizedAddress, Number(decimals));
       
-      console.log(`[chainlink] Added feed: ${symbol} -> ${feedAddress} (decimals=${decimals})`);
+      // Fetch latest price to seed cache
+      const [, answer] = await feedContract.latestRoundData();
+      const rawAnswer = BigInt(answer.toString());
+      
+      // Normalize answer to 1e18 BigInt using cached decimals
+      let normalizedAnswer: bigint;
+      if (decimals === 18) {
+        normalizedAnswer = rawAnswer;
+      } else if (decimals < 18) {
+        const exponent = 18 - decimals;
+        normalizedAnswer = rawAnswer * (10n ** BigInt(exponent));
+      } else {
+        const exponent = decimals - 18;
+        normalizedAnswer = rawAnswer / (10n ** BigInt(exponent));
+      }
+      
+      // Store in cache (same map used by getCachedPrice)
+      this.latestPrice1e18.set(normalizedAddress, normalizedAnswer);
+      
+      console.log(`[chainlink] Warmed feed: ${symbol} -> ${feedAddress} price=${normalizedAnswer.toString()} (1e18, decimals=${decimals})`);
     } catch (err) {
-      console.error(`[chainlink] Failed to query decimals for ${symbol} (${feedAddress}):`, err);
+      console.error(`[chainlink] Failed to warm feed ${symbol} (${feedAddress}):`, err);
       throw err;
     }
   }

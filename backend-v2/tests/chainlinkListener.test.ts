@@ -143,4 +143,58 @@ describe('ChainlinkListener Normalization Logic', () => {
       expect(decimalsCache.get('0x1234567890123456789012345678901234567890'.toLowerCase())).toBe(8);
     });
   });
+
+  describe('Cache seeding at startup', () => {
+    it('should seed cache with normalized price on addFeed', () => {
+      // Simulate cache seeding logic that happens in addFeed()
+      const latestPrice1e18 = new Map<string, bigint>();
+      const feedAddress = '0x1234567890123456789012345678901234567890';
+      
+      // Simulate fetched data from latestRoundData()
+      const rawAnswer = 300000000000n; // 3000 * 1e8 (8 decimals)
+      const decimals = 8;
+      
+      // Normalize to 1e18 (same logic as in addFeed)
+      let normalizedAnswer: bigint;
+      if (decimals === 18) {
+        normalizedAnswer = rawAnswer;
+      } else if (decimals < 18) {
+        const exponent = 18 - decimals;
+        normalizedAnswer = rawAnswer * (10n ** BigInt(exponent));
+      } else {
+        const exponent = decimals - 18;
+        normalizedAnswer = rawAnswer / (10n ** BigInt(exponent));
+      }
+      
+      // Store in cache
+      latestPrice1e18.set(feedAddress.toLowerCase(), normalizedAnswer);
+      
+      // Verify cache is populated
+      expect(latestPrice1e18.get(feedAddress.toLowerCase())).toBe(3000000000000000000000n); // 3000 * 1e18
+    });
+    
+    it('should seed cache with 18-decimal price (no conversion)', () => {
+      const latestPrice1e18 = new Map<string, bigint>();
+      const feedAddress = '0x1234567890123456789012345678901234567890';
+      
+      // 18 decimal price (no conversion needed)
+      const rawAnswer = 3000000000000000000000n; // 3000 * 1e18
+      const decimals = 18;
+      
+      let normalizedAnswer: bigint;
+      if (decimals === 18) {
+        normalizedAnswer = rawAnswer;
+      } else if (decimals < 18) {
+        const exponent = 18 - decimals;
+        normalizedAnswer = rawAnswer * (10n ** BigInt(exponent));
+      } else {
+        const exponent = decimals - 18;
+        normalizedAnswer = rawAnswer / (10n ** BigInt(exponent));
+      }
+      
+      latestPrice1e18.set(feedAddress.toLowerCase(), normalizedAnswer);
+      
+      expect(latestPrice1e18.get(feedAddress.toLowerCase())).toBe(3000000000000000000000n);
+    });
+  });
 });

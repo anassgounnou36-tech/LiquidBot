@@ -88,7 +88,19 @@ export class HealthFactorChecker {
           const healthFactorRaw = decoded[5];
           
           // Convert HF from ray (18 decimals) to float (for logging only)
-          const healthFactor = Number(healthFactorRaw) / 1e18;
+          // CRITICAL: Sanitize edge cases to avoid false minHF=0.0000
+          let healthFactor: number;
+          
+          if (totalDebtBase === 0n) {
+            // No debt: HF is effectively infinite (user cannot be liquidated)
+            healthFactor = Infinity;
+          } else if (healthFactorRaw === 0n) {
+            // Invalid/edge-case HF: treat as Infinity (user with collateral but zero calculated HF)
+            healthFactor = Infinity;
+          } else {
+            // Normal case: convert HF from ray (1e18) to float
+            healthFactor = Number(healthFactorRaw) / 1e18;
+          }
           
           // Calculate debtUsd1e18 from totalDebtBase correctly based on base currency
           let debtUsd1e18: bigint;
