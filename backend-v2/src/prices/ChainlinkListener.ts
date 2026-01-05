@@ -88,7 +88,7 @@ export class ChainlinkListener {
       console.log(`[chainlink] Warmed feed: ${symbol} -> ${feedAddress} price=${normalizedAnswer.toString()} (1e18, decimals=${decimals})`);
     } catch (err) {
       console.error(`[chainlink] Failed to warm feed ${symbol} (${feedAddress}):`, err);
-      throw err;
+      // Do NOT throw - continue startup and allow RPC fallback or OCR2 events to populate cache later
     }
   }
 
