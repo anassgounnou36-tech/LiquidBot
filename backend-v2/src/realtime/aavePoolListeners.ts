@@ -107,11 +107,11 @@ export class AavePoolListeners {
         this.dirtyQueue.markDirty(affected);
       }
       
-      // Log event trace if enabled
+      // Log event trace if enabled (ethers v6: blockNumber and transactionHash are direct properties)
       logEventTrace(
         'Borrow',
         event.blockNumber,
-        event.transactionHash || '0x',
+        event.transactionHash,
         affected,
         reserve,
         watched
@@ -136,11 +136,11 @@ export class AavePoolListeners {
         this.dirtyQueue.markDirty(affected);
       }
       
-      // Log event trace if enabled
+      // Log event trace if enabled (ethers v6: blockNumber and transactionHash are direct properties)
       logEventTrace(
         'Repay',
         event.blockNumber,
-        event.transactionHash || '0x',
+        event.transactionHash,
         affected,
         reserve,
         watched
@@ -165,11 +165,11 @@ export class AavePoolListeners {
         this.dirtyQueue.markDirty(affected);
       }
       
-      // Log event trace if enabled
+      // Log event trace if enabled (ethers v6: blockNumber and transactionHash are direct properties)
       logEventTrace(
         'Supply',
         event.blockNumber,
-        event.transactionHash || '0x',
+        event.transactionHash,
         affected,
         reserve,
         watched
@@ -193,11 +193,11 @@ export class AavePoolListeners {
         this.dirtyQueue.markDirty(affected);
       }
       
-      // Log event trace if enabled
+      // Log event trace if enabled (ethers v6: blockNumber and transactionHash are direct properties)
       logEventTrace(
         'Withdraw',
         event.blockNumber,
-        event.transactionHash || '0x',
+        event.transactionHash,
         affected,
         reserve,
         watched

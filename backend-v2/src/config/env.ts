@@ -67,10 +67,14 @@ const envSchema = z.object({
   CHAINLINK_FEEDS_BY_ADDRESS_JSON: optionalJsonString(z.record(z.string(), z.string())),
 
   // Pyth Network
+  PYTH_ENABLED: z.string().transform(val => val === 'true').default('false'),
   PYTH_WS_URL: z.string().url().default('wss://hermes.pyth.network/ws'),
   PYTH_ASSETS: commaSeparatedString.default('WETH,USDC,WBTC'),
   PYTH_STALE_SECS: z.coerce.number().min(10).default(60),
   PYTH_FEED_IDS_JSON: optionalJsonString(z.record(z.string(), z.string())),
+  PYTH_MIN_PCT_MOVE_DEFAULT: z.coerce.number().min(0).default(0.0005),
+  PYTH_MIN_PCT_MOVE_JSON: optionalJsonString(z.record(z.string(), z.number())),
+  PREDICT_MIN_RESCORE_INTERVAL_MS: z.coerce.number().min(100).max(5000).default(500),
 
   // Price cache configuration
   PRICE_CACHE_TTL_MS: z.coerce.number().min(1000).max(60000).default(8000),
@@ -93,6 +97,14 @@ const envSchema = z.object({
 
   // Dust liquidatable logging (HF < 1.0 but debt < MIN_DEBT_USD)
   LOG_DUST_LIQUIDATABLE: z.string().transform(val => val === 'true').default('false'),
+
+  // Heartbeat minHF user logging
+  LOG_MINHF_USER: z.string().transform(val => val === 'true').default('false'),
+
+  // Transaction replacement policy
+  REPLACE_AFTER_MS: z.coerce.number().min(1000).default(3000),
+  REPLACE_MAX_ATTEMPTS: z.coerce.number().min(1).default(3),
+  FEE_BUMP_PCT: z.coerce.number().min(1).max(100).default(20),
 });
 
 export type Env = z.infer<typeof envSchema>;

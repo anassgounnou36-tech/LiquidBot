@@ -48,6 +48,11 @@ const tokenDecimalsCache = new Map<string, number>();
 let chainlinkListenerInstance: ChainlinkListener | null = null;
 
 /**
+ * PythListener instance for prediction price lookups (secondary cache)
+ */
+let pythListenerInstance: any | null = null;
+
+/**
  * Cache miss warning cooldown (symbol -> last warn timestamp)
  * Prevents log spam when cache is cold
  */
@@ -142,6 +147,16 @@ export function initPythFeeds(feeds: Record<string, string>): void {
 export function setChainlinkListener(listener: ChainlinkListener): void {
   chainlinkListenerInstance = listener;
   console.log('[priceMath] ChainlinkListener instance registered for cache-first lookups');
+}
+
+/**
+ * Set PythListener instance for prediction price lookups
+ * PythListener is used as a secondary cache for predictive re-scoring only
+ * Chainlink remains the execution authority
+ */
+export function setPythListener(listener: any): void {
+  pythListenerInstance = listener;
+  console.log('[priceMath] PythListener instance registered for prediction lookups');
 }
 
 /**
@@ -529,6 +544,52 @@ export async function getUsdPriceForAddress(address: string): Promise<bigint> {
   
   // Fetch price using symbol (which has its own cache layering)
   return getUsdPrice(symbol);
+}
+
+/**
+ * Get USD price for prediction/re-scoring (normalized to 1e18 BigInt)
+ * PREDICTION PATH: Uses Pyth as secondary cache when available and fresh
+ * Order: Chainlink listener cache → PythListener cache (if enabled and fresh) → local TTL cache → RPC fallback
+ * 
+ * This is used for predictive re-scoring only. Chainlink remains the execution authority.
+ * 
+ * Cache layering (in order):
+ * 1. ChainlinkListener cache (execution authority, updated by OCR2 events)
+ * 2. PythListener cache (secondary, if PYTH_ENABLED and fresh within PYTH_STALE_SECS)
+ * 3. Local priceCache (warmed at startup, TTL-based)
+ * 4. RPC fallback (only on startup or cache miss)
+ */
+export async function getUsdPriceForPrediction(symbol: string): Promise<bigint> {
+  const normalizedSymbol = symbol.toUpperCase();
+
+  // LAYER 1: Try ChainlinkListener cache first (execution authority)
+  const feedAddress = chainlinkFeedAddresses.get(normalizedSymbol);
+  if (feedAddress && chainlinkListenerInstance) {
+    const cachedPrice = chainlinkListenerInstance.getCachedPrice(feedAddress);
+    if (cachedPrice !== null) {
+      priceSourceCounters.listenerHits++;
+      return cachedPrice;
+    }
+  }
+
+  // LAYER 2: Try PythListener cache if enabled and fresh
+  if (pythListenerInstance) {
+    const pythPrice = pythListenerInstance.getPrice1e18(normalizedSymbol);
+    if (pythPrice !== null && pythListenerInstance.isFresh(normalizedSymbol)) {
+      // Pyth price is available and fresh - use it for prediction
+      return pythPrice;
+    }
+  }
+
+  // LAYER 3: Check local price cache (warmed at startup)
+  const localCached = getLocalCachedPrice(normalizedSymbol, config.PRICE_CACHE_TTL_MS);
+  if (localCached !== null) {
+    priceSourceCounters.localHits++;
+    return localCached;
+  }
+
+  // LAYER 4: Fallback to execution path (getUsdPrice with RPC fallback)
+  return getUsdPrice(normalizedSymbol);
 }
 
 /**
