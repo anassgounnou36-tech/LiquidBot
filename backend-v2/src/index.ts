@@ -4,6 +4,7 @@ import { seedBorrowerUniverse, DEFAULT_UNIVERSE_MAX_CANDIDATES } from './subgrap
 import { ActiveRiskSet } from './risk/ActiveRiskSet.js';
 import { HealthFactorChecker } from './risk/HealthFactorChecker.js';
 import { ChainlinkListener } from './prices/ChainlinkListener.js';
+import { PythListener } from './prices/PythListener.js';
 import { TelegramNotifier } from './notify/TelegramNotifier.js';
 import { config } from './config/index.js';
 import { DirtyQueue } from './realtime/dirtyQueue.js';
@@ -20,6 +21,8 @@ import { metrics } from './metrics/metrics.js';
 import { computeNetDebtToken } from './execution/safety.js';
 import { logHeartbeat } from './metrics/blockHeartbeat.js';
 import { getWsProvider } from './providers/ws.js';
+import { UserIndex } from './predictive/UserIndex.js';
+import { PredictiveLoop } from './predictive/PredictiveLoop.js';
 
 // 1inch swap slippage tolerance
 // Should be adjusted based on market conditions and token pair liquidity
@@ -88,6 +91,10 @@ async function main() {
     console.log('[v2] ⚠️  Pyth price feeds are DISABLED in this version');
     console.log('[v2] Using Chainlink feeds only for price data');
     
+    // PREDICTIVE LIQUIDATION: Enable Pyth listener for predictive pipeline
+    console.log('[v2] 🔮 Enabling Pyth for predictive liquidation pipeline');
+    const pythListener = new PythListener();
+    
     const chainlinkListener = new ChainlinkListener();
     
     // Collect all unique feed addresses to subscribe
@@ -145,6 +152,18 @@ async function main() {
     
     console.log('[v2] Price oracles configured (Chainlink only)');
     
+    // Wire Pyth listener to priceMath.updateCachedPrice()
+    pythListener.onPriceUpdate((update) => {
+      // Normalize Pyth price to 1e18 BigInt for cache
+      const price1e18 = BigInt(Math.floor(update.price * 1e18));
+      updateCachedPrice(update.symbol, price1e18);
+      console.log(`[v2] Pyth price updated: ${update.symbol} = $${update.price.toFixed(2)}`);
+    });
+    
+    // Start Pyth listener
+    await pythListener.start();
+    console.log('[v2] Pyth listener started for predictive pipeline');
+    
     // Ensure ETH/WETH price is ready before Phase 4 scan to avoid cache misses
     console.log('[v2] Ensuring ETH/WETH price readiness...');
     const ethFeedAddress = resolveEthUsdFeedAddress();
@@ -185,6 +204,13 @@ async function main() {
     // 4. Build initial active risk set with on-chain HF checks
     console.log('[v2] Phase 4: Building active risk set');
     const riskSet = new ActiveRiskSet();
+    
+    // Build UserIndex for predictive liquidation
+    const userIndex = new UserIndex();
+    riskSet.setUserIndex(userIndex);
+    riskSet.setDataProvider(dataProvider);
+    console.log('[v2] UserIndex initialized and wired to ActiveRiskSet');
+    
     riskSet.addBulk(users);
     
     const hfChecker = new HealthFactorChecker();
@@ -197,15 +223,13 @@ async function main() {
     const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
     
     // Update risk set with fresh HFs
-    let watchedCount = 0;
     let dustLiquidatableCount = 0;
     
     for (const result of results) {
-      riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18);
+      riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18, result.totalCollateralBase);
       
       // Log watched/actionable users (HF < threshold AND debt >= MIN_DEBT_USD)
       if (result.healthFactor < config.HF_THRESHOLD_START && result.debtUsd1e18 >= minDebtUsd1e18) {
-        watchedCount++;
         const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;
         console.log(
           `[v2] Watched user: ${result.address} HF=${result.healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)}`
@@ -241,7 +265,23 @@ async function main() {
       (config.LOG_DUST_LIQUIDATABLE ? ` dustLiquidatable=${dustLiquidatableCount}` : ' (dust log disabled)') +
       (minHF !== null ? ` minHF=${minHF.toFixed(4)}` : '')
     );
+    
+    // Log UserIndex statistics with avgTokensPerUser
+    const indexStats = userIndex.getStats();
+    console.log(`[predict] userIndex built: users=${indexStats.userCount} tokens=${indexStats.tokenCount} avgTokensPerUser=${indexStats.avgTokensPerUser}`);
     console.log();
+
+    // 4a. Setup PredictiveLoop for Pyth-driven rescoring
+    console.log('[v2] Phase 4a: Setting up predictive liquidation loop');
+    const predictiveLoop = new PredictiveLoop(
+      pythListener,
+      userIndex,
+      hfChecker,
+      riskSet
+    );
+    // Note: Execution components will be wired after they're created in Phase 6
+    predictiveLoop.start();
+    console.log('[v2] PredictiveLoop started\n');
 
     // 5. Setup realtime triggers and dirty queue
     console.log('[v2] Phase 5: Setting up realtime triggers');
@@ -274,6 +314,10 @@ async function main() {
     const oneInchBuilder = new OneInchSwapBuilder(8453); // Base chain ID
     const liquidationPlanner = new LiquidationPlanner(config.AAVE_PROTOCOL_DATA_PROVIDER);
     const attemptHistory = new AttemptHistory();
+    
+    // Wire execution components to PredictiveLoop for plan preparation
+    predictiveLoop.setExecutionComponents(liquidationPlanner, oneInchBuilder);
+    console.log('[v2] Execution components wired to PredictiveLoop');
     
     console.log(`[v2] Executor client initialized (address=${executorClient.getAddress()})`);
     console.log(`[v2] Wallet address: ${executorClient.getWalletAddress()}`);
@@ -321,24 +365,53 @@ async function main() {
             return;
           }
           
-          // Build candidate plans (up to 3)
+          // Check if we have a prepared plan in cache
+          const preparedPlan = predictiveLoop.getPlanCache().get(user);
           let candidates;
-          try {
-            candidates = await liquidationPlanner.buildCandidatePlans(user);
-          } catch (err) {
-            console.error(
-              `[execute] Failed to build liquidation plans for ${user}:`,
-              err instanceof Error ? err.message : err
-            );
-            attemptHistory.record({
-              user,
-              timestamp: Date.now(),
-              status: 'error',
-              error: err instanceof Error ? err.message : String(err)
-            });
-            return;
+          let usingPreparedPlan = false;
+          let cacheReason = '';
+          
+          if (preparedPlan) {
+            const cacheAgeMs = Date.now() - preparedPlan.createdAt;
+            console.log(`[execute] Found prepared plan for user=${user.substring(0, 10)}... cacheAgeMs=${cacheAgeMs}`);
+            
+            // Convert prepared plan to candidate format with real metadata
+            candidates = [{
+              debtAsset: preparedPlan.debtAsset,
+              collateralAsset: preparedPlan.collateralAsset,
+              debtToCover: preparedPlan.debtToCover,
+              expectedCollateralOut: preparedPlan.expectedCollateralOut,
+              oracleScore: preparedPlan.score,
+              debtAssetDecimals: preparedPlan.debtAssetDecimals,
+              collateralAssetDecimals: preparedPlan.collateralAssetDecimals,
+              liquidationBonusBps: preparedPlan.liquidationBonusBps
+            }];
+            usingPreparedPlan = true;
+          } else {
+            cacheReason = 'cache_miss';
+            console.log(`[execute] No prepared plan found, building fresh candidates for user=${user.substring(0, 10)}...`);
           }
           
+          // Build candidate plans if not using prepared plan
+          if (!usingPreparedPlan) {
+            try {
+              candidates = await liquidationPlanner.buildCandidatePlans(user);
+            } catch (err) {
+              console.error(
+                `[execute] Failed to build liquidation plans for ${user}:`,
+                err instanceof Error ? err.message : err
+              );
+              attemptHistory.record({
+                user,
+                timestamp: Date.now(),
+                status: 'error',
+                error: err instanceof Error ? err.message : String(err)
+              });
+              return;
+            }
+          }
+          
+          // Check if we have valid candidates
           if (!candidates || candidates.length === 0) {
             console.warn(`[execute] No liquidation plans available for user=${user}`);
             attemptHistory.record({
@@ -347,6 +420,14 @@ async function main() {
               status: 'skip_no_pair'
             });
             return;
+          }
+          
+          // Log execution strategy
+          if (usingPreparedPlan) {
+            const cacheAgeMs = Date.now() - preparedPlan!.createdAt;
+            console.log(`[execute] user=${user.substring(0, 10)}... usingPreparedPlan=true cacheAgeMs=${cacheAgeMs}`);
+          } else {
+            console.log(`[execute] user=${user.substring(0, 10)}... usingPreparedPlan=false reason=${cacheReason}`);
           }
           
           console.log(`[execute] Built ${candidates.length} candidate plans for user=${user}`);
@@ -369,17 +450,31 @@ async function main() {
             return;
           }
           
-          // REAL EXECUTION PATH: Quote-based candidate selection
+          // REAL EXECUTION PATH: Use prepared plan or quote-based candidate selection
           try {
-            // Quote each candidate and compute netDebtToken
-            const quotedCandidates: Array<{
-              candidate: typeof candidates[0];
-              minOut: bigint;
-              netDebtToken: bigint;
-              swapData: string;
-            }> = [];
+            let chosen;
             
-            for (let i = 0; i < candidates.length; i++) {
+            // If using prepared plan, skip quoting and use cached data
+            if (usingPreparedPlan && preparedPlan) {
+              // Use prepared plan's precomputed data directly
+              const netDebtToken = computeNetDebtToken(preparedPlan.minOut, preparedPlan.debtToCover);
+              chosen = {
+                candidate: candidates[0],
+                minOut: preparedPlan.minOut,
+                netDebtToken,
+                swapData: preparedPlan.oneInchCalldata
+              };
+              console.log(`[execute] Using prepared plan (skipping 1inch quote)`);
+            } else {
+              // Quote each candidate and compute netDebtToken
+              const quotedCandidates: Array<{
+                candidate: typeof candidates[0];
+                minOut: bigint;
+                netDebtToken: bigint;
+                swapData: string;
+              }> = [];
+              
+              for (let i = 0; i < candidates.length; i++) {
               const candidate = candidates[i];
               
               try {
@@ -446,7 +541,9 @@ async function main() {
               return 0;
             });
             
-            const chosen = quotedCandidates[0];
+            chosen = quotedCandidates[0];
+            }
+            
             console.log(
               `[execute] ⭐ Chosen candidate: debt=${chosen.candidate.debtAsset.substring(0, 10)}... ` +
               `collateral=${chosen.candidate.collateralAsset.substring(0, 10)}... ` +
@@ -476,6 +573,9 @@ async function main() {
               payout: executorClient.getWalletAddress(),
               expectedCollateralOut: chosen.candidate.expectedCollateralOut
             });
+            
+            // Invalidate plan cache after execution attempt (success or failure)
+            predictiveLoop.getPlanCache().invalidate(user);
             
             if (result.status === 'mined') {
               console.log(`[execute] ✅ Liquidation successful! txHash=${result.txHash}`);
@@ -540,7 +640,7 @@ async function main() {
       wsProvider.on('block', (blockNumber: number) => {
         const everyN = Math.max(1, config.BLOCK_HEARTBEAT_EVERY_N);
         if (blockNumber % everyN !== 0) return;
-        logHeartbeat(blockNumber, riskSet);
+        logHeartbeat(blockNumber, riskSet, predictiveLoop);
       });
       console.log(`[v2] Block heartbeat enabled (every ${config.BLOCK_HEARTBEAT_EVERY_N} block(s))\n`);
     }
@@ -561,6 +661,7 @@ async function main() {
       verifierLoop.stop();
       aaveListeners.stop();
       liquidationAudit.stop();
+      await pythListener.stop();
       await notifier.notify('🛑 <b>LiquidBot v2 Stopped</b>');
       process.exit(0);
     });
@@ -570,6 +671,7 @@ async function main() {
       verifierLoop.stop();
       aaveListeners.stop();
       liquidationAudit.stop();
+      await pythListener.stop();
       await notifier.notify('🛑 <b>LiquidBot v2 Stopped</b>');
       process.exit(0);
     });

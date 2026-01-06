@@ -104,7 +104,7 @@ export class RealtimeOrchestrator {
 
     // Update risk set with fresh HFs
     for (const result of results) {
-      this.riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18);
+      this.riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18, result.totalCollateralBase);
 
       // Check if liquidatable (HF < execute threshold)
       if (result.healthFactor < config.HF_THRESHOLD_EXECUTE) {
@@ -143,7 +143,7 @@ export class RealtimeOrchestrator {
 
     // Update risk set
     for (const result of results) {
-      this.riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18);
+      this.riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18, result.totalCollateralBase);
 
       if (result.healthFactor < config.HF_THRESHOLD_EXECUTE) {
         const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;

@@ -86,7 +86,7 @@ export class VerifierLoop {
     
     for (const result of results) {
       // Update active risk set with fresh HF and debtUsd1e18
-      this.activeRiskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18);
+      this.activeRiskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18, result.totalCollateralBase);
 
       // Check if user should be executed
       const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);

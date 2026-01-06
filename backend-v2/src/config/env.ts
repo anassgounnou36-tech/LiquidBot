@@ -71,6 +71,23 @@ const envSchema = z.object({
   PYTH_ASSETS: commaSeparatedString.default('WETH,USDC,WBTC'),
   PYTH_STALE_SECS: z.coerce.number().min(10).default(60),
   PYTH_FEED_IDS_JSON: optionalJsonString(z.record(z.string(), z.string())),
+  PYTH_SYMBOL_TO_ADDRESS_JSON: optionalJsonString(z.record(z.string(), z.string())),
+
+  // Predictive liquidation configuration
+  PYTH_MIN_PCT_MOVE_DEFAULT: z.coerce.number().min(0).max(1).default(0.0005),
+  PYTH_MIN_PCT_MOVE_JSON: optionalJsonString(z.record(z.string(), z.number())),
+  PREDICTIVE_PREPARE_HF_THRESHOLD: z.coerce.number().min(1.0).max(1.5).default(1.02),
+  PREDICTIVE_RESCORE_RATE_LIMIT_MS: z.coerce.number().min(1000).max(60000).default(5000),
+  
+  // Pre-submit plan cache configuration
+  PREDICT_PREPARE_HF: z.coerce.number().min(1.0).max(1.5).default(1.02),
+  PREDICT_URGENT_HF: z.coerce.number().min(0.9).max(1.1).default(1.005),
+  PREDICT_MIN_RESCORE_INTERVAL_MS: z.coerce.number().min(100).max(10000).default(500),
+  PLAN_TTL_MS: z.coerce.number().min(1000).max(60000).default(15000),
+  PLAN_MAX_USERS: z.coerce.number().min(100).max(10000).default(2000),
+  
+  // UserIndex refresh throttle configuration
+  INDEX_REFRESH_MS: z.coerce.number().min(1000).max(300000).default(30000),
 
   // Price cache configuration
   PRICE_CACHE_TTL_MS: z.coerce.number().min(1000).max(60000).default(8000),
@@ -86,6 +103,7 @@ const envSchema = z.object({
   // Block heartbeat configuration
   LOG_BLOCK_HEARTBEAT: z.string().transform(val => val === 'true').default('false'),
   BLOCK_HEARTBEAT_EVERY_N: z.coerce.number().min(1).default(1),
+  LOG_MINHF_USER: z.string().transform(val => val === 'true').default('false'),
 
   // Live event trace configuration
   LOG_LIVE_EVENTS: z.string().transform(val => val === 'true').default('false'),
