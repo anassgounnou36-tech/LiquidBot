@@ -11,10 +11,13 @@ import { config } from '../config/index.js';
 export class Rescorer {
   private hfChecker: HealthFactorChecker;
   private riskSet: ActiveRiskSet;
+  private minDebtUsd1e18: bigint;
 
   constructor(hfChecker: HealthFactorChecker, riskSet: ActiveRiskSet) {
     this.hfChecker = hfChecker;
     this.riskSet = riskSet;
+    // Pre-compute minimum debt threshold to avoid repeated computation
+    this.minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
   }
 
   /**
@@ -64,8 +67,7 @@ export class Rescorer {
       this.riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18);
       
       // Check if user needs execution
-      const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
-      if (result.healthFactor <= config.HF_THRESHOLD_EXECUTE && result.debtUsd1e18 >= minDebtUsd1e18) {
+      if (result.healthFactor <= config.HF_THRESHOLD_EXECUTE && result.debtUsd1e18 >= this.minDebtUsd1e18) {
         return true; // Needs execution
       }
       

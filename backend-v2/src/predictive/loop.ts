@@ -93,7 +93,12 @@ export class PredictiveLoop {
     const lastPrice = this.lastPrices.get(symbol);
     if (lastPrice) {
       const minPctMove = this.minPctMoveBySymbol.get(symbol) || this.minPctMoveDefault;
-      const pctMove = Math.abs(Number(price1e18 - lastPrice)) / Number(lastPrice);
+      
+      // Calculate percentage move using BigInt to avoid precision loss
+      // pctMove = abs(price1e18 - lastPrice) / lastPrice
+      const priceDiff = price1e18 > lastPrice ? price1e18 - lastPrice : lastPrice - price1e18;
+      const pctMove1e18 = (priceDiff * 1000000n) / lastPrice; // Scale by 1e6 for precision
+      const pctMove = Number(pctMove1e18) / 1e6;
       
       if (pctMove < minPctMove) {
         // Price move too small - skip
