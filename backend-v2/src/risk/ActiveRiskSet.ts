@@ -95,14 +95,14 @@ export class ActiveRiskSet {
       candidate.healthFactor = healthFactor;
       candidate.lastDebtUsd1e18 = debtUsd1e18;
       candidate.lastChecked = Date.now();
+      
+      // Update UserIndex (already exists in candidate set)
+      if (this.userIndex) {
+        this.updateUserIndexForUser(normalized);
+      }
     } else {
+      // User not in set - add them (will call updateUserIndexForUser internally)
       this.add(normalized, healthFactor, debtUsd1e18);
-    }
-    
-    // Update UserIndex with minimal token set (ETH/WETH for now)
-    // TODO: Extract full per-user reserve breakdown when balance data is available
-    if (this.userIndex) {
-      this.updateUserIndexForUser(normalized);
     }
   }
 

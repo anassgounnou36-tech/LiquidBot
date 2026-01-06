@@ -55,6 +55,9 @@ export class PredictiveLoop {
   
   // Prepare HF threshold (for future pre-submit plan caching)
   private prepareHfThreshold: number;
+  
+  // Track unknown symbols to avoid log spam
+  private unknownSymbols: Set<string> = new Set();
 
   constructor(
     pythListener: PythListener,
@@ -108,8 +111,11 @@ export class PredictiveLoop {
     const tokenAddress = SYMBOL_TO_ADDRESS_MAP[update.symbol.toUpperCase()];
     
     if (!tokenAddress) {
-      // Unknown symbol - log once and skip
-      console.warn(`[predict] Unknown symbol ${update.symbol} - no address mapping configured`);
+      // Unknown symbol - log once per symbol to avoid spam
+      if (!this.unknownSymbols.has(update.symbol)) {
+        console.warn(`[predict] Unknown symbol ${update.symbol} - no address mapping configured`);
+        this.unknownSymbols.add(update.symbol);
+      }
       return;
     }
     
