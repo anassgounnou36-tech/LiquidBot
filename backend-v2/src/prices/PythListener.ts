@@ -38,6 +38,9 @@ export class PythListener {
   private shouldReconnect = true;
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private lastMessageTime = 0;
+  
+  // Price cache: symbol -> { price1e18: bigint, publishTime: number }
+  private priceCache = new Map<string, { price1e18: bigint; publishTime: number }>();
 
   constructor() {
     this.wsUrl = config.PYTH_WS_URL;
@@ -229,6 +232,14 @@ export class PythListener {
       const priceValue = Number(price.price) * Math.pow(10, Number(price.expo));
       const confidence = price.conf ? Number(price.conf) * Math.pow(10, Number(price.expo)) : undefined;
 
+      // Convert to 1e18-scaled BigInt for cache
+      // Note: Math.floor precision is acceptable for USD prices at 1e18 scale
+      // Pyth prices already have sufficient precision from expo conversion
+      const price1e18 = BigInt(Math.floor(priceValue * 1e18));
+
+      // Update price cache
+      this.priceCache.set(symbol.toUpperCase(), { price1e18, publishTime });
+
       // Check staleness
       const now = Math.floor(Date.now() / 1000);
       const ageSec = now - publishTime;
@@ -314,5 +325,40 @@ export class PythListener {
         this.connect();
       }
     }, Math.min(delay, 60000)); // Max 1 minute delay
+  }
+
+  /**
+   * Get cached price as 1e18-scaled BigInt
+   * Returns null if not cached
+   * @param symbol Asset symbol (e.g., "WETH", "USDC")
+   */
+  getPrice1e18(symbol: string): bigint | null {
+    const cached = this.priceCache.get(symbol.toUpperCase());
+    return cached ? cached.price1e18 : null;
+  }
+
+  /**
+   * Check if cached price is fresh (within staleness threshold)
+   * @param symbol Asset symbol
+   */
+  isFresh(symbol: string): boolean {
+    const cached = this.priceCache.get(symbol.toUpperCase());
+    if (!cached) {
+      return false;
+    }
+    
+    const now = Math.floor(Date.now() / 1000);
+    const ageSec = now - cached.publishTime;
+    return ageSec <= this.staleSecs;
+  }
+
+  /**
+   * Get last update timestamp (Unix epoch seconds)
+   * Returns 0 if not cached
+   * @param symbol Asset symbol
+   */
+  getLastUpdateTs(symbol: string): number {
+    const cached = this.priceCache.get(symbol.toUpperCase());
+    return cached ? cached.publishTime : 0;
   }
 }
