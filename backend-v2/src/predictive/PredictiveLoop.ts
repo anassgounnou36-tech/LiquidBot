@@ -276,7 +276,7 @@ export class PredictiveLoop {
     }
     
     // Update risk set with fresh HF
-    this.riskSet.updateHF(userAddress, result.healthFactor, result.debtUsd1e18);
+    this.riskSet.updateHF(userAddress, result.healthFactor, result.debtUsd1e18, result.totalCollateralBase);
     
     const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;
     
@@ -328,7 +328,7 @@ export class PredictiveLoop {
       
       const minOut = BigInt(swapQuote.minOut);
       
-      // Store prepared plan
+      // Store prepared plan with real metadata
       const plan: PreparedPlan = {
         user: userAddress,
         debtAsset: candidate.debtAsset,
@@ -338,7 +338,11 @@ export class PredictiveLoop {
         minOut,
         oneInchCalldata: swapQuote.data,
         score: candidate.oracleScore,
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        // Real metadata from candidate (not placeholders)
+        debtAssetDecimals: candidate.debtAssetDecimals,
+        collateralAssetDecimals: candidate.collateralAssetDecimals,
+        liquidationBonusBps: candidate.liquidationBonusBps
       };
       
       this.planCache.prepare(plan);

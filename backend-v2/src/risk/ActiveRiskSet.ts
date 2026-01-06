@@ -12,7 +12,9 @@ export interface CandidateUser {
   address: string;
   healthFactor: number;
   lastDebtUsd1e18: bigint;
+  totalCollateralBase: bigint;
   lastChecked: number;
+  lastIndexRefresh?: number; // Timestamp of last UserIndex refresh for this user
 }
 
 /**
@@ -49,7 +51,7 @@ export class ActiveRiskSet {
    * Add or update a user in the risk set
    * Enforces minimum debt requirement - users below MIN_DEBT_USD are not added
    */
-  add(address: string, healthFactor: number, debtUsd1e18: bigint = 0n): void {
+  add(address: string, healthFactor: number, debtUsd1e18: bigint = 0n, totalCollateralBase: bigint = 0n): void {
     const normalized = address.toLowerCase();
     
     // Enforce minimum debt at admission
@@ -63,10 +65,11 @@ export class ActiveRiskSet {
       address: normalized,
       healthFactor,
       lastDebtUsd1e18: debtUsd1e18,
+      totalCollateralBase,
       lastChecked: Date.now()
     });
     
-    // Update UserIndex with actual user tokens
+    // Update UserIndex with actual user tokens (with throttling)
     if (this.userIndex && this.dataProvider) {
       this.updateUserIndexForUser(normalized).catch(err => {
         console.warn(`[risk] Failed to update UserIndex for ${normalized}:`, err instanceof Error ? err.message : err);
@@ -88,7 +91,7 @@ export class ActiveRiskSet {
    * Update health factor and debt USD for a user
    * Enforces minimum debt requirement - removes users that drop below MIN_DEBT_USD
    */
-  updateHF(address: string, healthFactor: number, debtUsd1e18: bigint): void {
+  updateHF(address: string, healthFactor: number, debtUsd1e18: bigint, totalCollateralBase: bigint = 0n): void {
     const normalized = address.toLowerCase();
     const candidate = this.candidates.get(normalized);
     
@@ -105,17 +108,26 @@ export class ActiveRiskSet {
     if (candidate) {
       candidate.healthFactor = healthFactor;
       candidate.lastDebtUsd1e18 = debtUsd1e18;
+      candidate.totalCollateralBase = totalCollateralBase;
       candidate.lastChecked = Date.now();
       
-      // Update UserIndex with actual user tokens
+      // Update UserIndex with throttling to avoid hammering ProtocolDataProvider
       if (this.userIndex && this.dataProvider) {
-        this.updateUserIndexForUser(normalized).catch(err => {
-          console.warn(`[risk] Failed to update UserIndex for ${normalized}:`, err instanceof Error ? err.message : err);
-        });
+        const now = Date.now();
+        const lastRefresh = candidate.lastIndexRefresh || 0;
+        const INDEX_REFRESH_THROTTLE_MS = 30000; // 30 seconds
+        
+        // Only refresh if enough time has passed
+        if (now - lastRefresh >= INDEX_REFRESH_THROTTLE_MS) {
+          candidate.lastIndexRefresh = now;
+          this.updateUserIndexForUser(normalized).catch(err => {
+            console.warn(`[risk] Failed to update UserIndex for ${normalized}:`, err instanceof Error ? err.message : err);
+          });
+        }
       }
     } else {
       // User not in set - add them (will call updateUserIndexForUser internally)
-      this.add(normalized, healthFactor, debtUsd1e18);
+      this.add(normalized, healthFactor, debtUsd1e18, totalCollateralBase);
     }
   }
 

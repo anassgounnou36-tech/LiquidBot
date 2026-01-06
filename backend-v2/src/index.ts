@@ -226,7 +226,7 @@ async function main() {
     let dustLiquidatableCount = 0;
     
     for (const result of results) {
-      riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18);
+      riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18, result.totalCollateralBase);
       
       // Log watched/actionable users (HF < threshold AND debt >= MIN_DEBT_USD)
       if (result.healthFactor < config.HF_THRESHOLD_START && result.debtUsd1e18 >= minDebtUsd1e18) {
@@ -375,16 +375,16 @@ async function main() {
             const cacheAgeMs = Date.now() - preparedPlan.createdAt;
             console.log(`[execute] Found prepared plan for user=${user.substring(0, 10)}... cacheAgeMs=${cacheAgeMs}`);
             
-            // Convert prepared plan to candidate format
+            // Convert prepared plan to candidate format with real metadata
             candidates = [{
               debtAsset: preparedPlan.debtAsset,
               collateralAsset: preparedPlan.collateralAsset,
               debtToCover: preparedPlan.debtToCover,
               expectedCollateralOut: preparedPlan.expectedCollateralOut,
               oracleScore: preparedPlan.score,
-              debtAssetDecimals: 18, // Placeholder - not critical for prepared plans
-              collateralAssetDecimals: 18,
-              liquidationBonusBps: 500
+              debtAssetDecimals: preparedPlan.debtAssetDecimals,
+              collateralAssetDecimals: preparedPlan.collateralAssetDecimals,
+              liquidationBonusBps: preparedPlan.liquidationBonusBps
             }];
             usingPreparedPlan = true;
           } else {

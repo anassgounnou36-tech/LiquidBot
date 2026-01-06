@@ -12,6 +12,10 @@ export interface PreparedPlan {
   oneInchCalldata: string;
   score: bigint; // profit estimate (oracle-based)
   createdAt: number;
+  // Real metadata (not placeholders)
+  debtAssetDecimals: number;
+  collateralAssetDecimals: number;
+  liquidationBonusBps: number;
 }
 
 /**

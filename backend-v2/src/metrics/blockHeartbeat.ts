@@ -62,11 +62,11 @@ export function logHeartbeat(
   for (const user of belowThreshold) {
     const hf = user.healthFactor;
     
-    // Check actionable criteria
+    // Check actionable criteria: must have real collateral to liquidate
     const isActionable = 
       user.lastDebtUsd1e18 >= minDebtUsd1e18 &&
       Number.isFinite(hf) &&
-      hf > 0; // Collateral must be non-zero (HF would be Infinity or 0 otherwise)
+      user.totalCollateralBase > 0n; // Must have collateral to seize
     
     if (!isActionable) continue;
     
