@@ -8,6 +8,20 @@ import type { ActiveRiskSet } from '../risk/ActiveRiskSet.js';
 import { config } from '../config/index.js';
 
 /**
+ * Symbol to canonical token address mapping for Base network
+ * Used to resolve Pyth symbol updates to actual token addresses
+ */
+const SYMBOL_TO_ADDRESS_MAP: Record<string, string> = {
+  'ETH': '0x0000000000000000000000000000000000000000',
+  'WETH': '0x4200000000000000000000000000000000000006',
+  'USDC': '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',
+  'WBTC': '0x0555e30da8f98308edb960aa94c0db47230d2b9c',
+  'cbETH': '0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22',
+  'DAI': '0x50c5725949a6f0c72e6c4a641f24049a917db0cb',
+  'USDbC': '0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca',
+};
+
+/**
  * PredictiveLoop: Monitor Pyth price updates and trigger predictive rescoring
  * 
  * Flow:
@@ -90,10 +104,17 @@ export class PredictiveLoop {
    * Handle a Pyth price update
    */
   private async handlePriceUpdate(update: PythPriceUpdate): Promise<void> {
-    // TODO: Map symbol to token address
-    // For now, we'll use symbol as a placeholder until we have proper address mapping
-    // In production, we'd need a symbol->address mapping from the protocol data
-    const tokenKey = update.symbol.toLowerCase();
+    // Resolve symbol to token address using canonical mapping
+    const tokenAddress = SYMBOL_TO_ADDRESS_MAP[update.symbol.toUpperCase()];
+    
+    if (!tokenAddress) {
+      // Unknown symbol - log once and skip
+      console.warn(`[predict] Unknown symbol ${update.symbol} - no address mapping configured`);
+      return;
+    }
+    
+    // Use lowercase address as canonical key
+    const tokenKey = tokenAddress.toLowerCase();
     
     // Get last price
     const lastPrice = this.lastPrices.get(tokenKey);
@@ -103,7 +124,9 @@ export class PredictiveLoop {
     
     // If this is the first price for this token, skip movement calculation
     if (lastPrice === undefined) {
-      console.log(`[predict] Initial price for ${update.symbol}: $${update.price.toFixed(2)}`);
+      console.log(
+        `[predict] Initial price for ${update.symbol} (${tokenKey.substring(0, 10)}...): $${update.price.toFixed(2)}`
+      );
       return;
     }
     
@@ -121,21 +144,18 @@ export class PredictiveLoop {
     
     // Log tick
     console.log(
-      `[predict] tick token=${update.symbol} ` +
+      `[predict] tick token=${update.symbol} (${tokenKey.substring(0, 10)}...) ` +
       `price=$${update.price.toFixed(2)} ` +
       `lastPrice=$${lastPrice.toFixed(2)} ` +
       `pctMove=${(pctMove * 100).toFixed(3)}% ` +
       `threshold=${(threshold * 100).toFixed(3)}%`
     );
     
-    // Get affected users from UserIndex
-    // TODO: In production, we need to map symbol to actual token address
-    // For now, this is a placeholder that will be enhanced when we have proper
-    // token address resolution from the protocol
+    // Get affected users from UserIndex using token address
     const affectedUsers = this.userIndex.getUsersForToken(tokenKey);
     
     if (affectedUsers.size === 0) {
-      console.log(`[predict] No users indexed for token ${update.symbol}`);
+      console.log(`[predict] No users indexed for token ${update.symbol} (${tokenKey.substring(0, 10)}...)`);
       return;
     }
     
