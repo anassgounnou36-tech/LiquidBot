@@ -4,6 +4,7 @@ import { ethers } from 'ethers';
 import { getHttpProvider } from '../providers/rpc.js';
 import { config } from '../config/index.js';
 import type { ChainlinkListener } from './ChainlinkListener.js';
+import type { PythListener } from './PythListener.js';
 
 /**
  * Chainlink decimals cache
@@ -50,7 +51,7 @@ let chainlinkListenerInstance: ChainlinkListener | null = null;
 /**
  * PythListener instance for prediction price lookups (secondary cache)
  */
-let pythListenerInstance: any | null = null;
+let pythListenerInstance: PythListener | null = null;
 
 /**
  * Cache miss warning cooldown (symbol -> last warn timestamp)
@@ -154,7 +155,7 @@ export function setChainlinkListener(listener: ChainlinkListener): void {
  * PythListener is used as a secondary cache for predictive re-scoring only
  * Chainlink remains the execution authority
  */
-export function setPythListener(listener: any): void {
+export function setPythListener(listener: PythListener): void {
   pythListenerInstance = listener;
   console.log('[priceMath] PythListener instance registered for prediction lookups');
 }

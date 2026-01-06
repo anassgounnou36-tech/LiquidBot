@@ -153,8 +153,8 @@ export class PredictiveLoop {
       return;
     }
 
-    // Store in const to help TypeScript narrow the type
-    // Non-null assertion is safe here because we've already checked above
+    // TypeScript doesn't recognize control flow here, so we use assertion
+    // This is safe because we've returned early if snapshot is undefined
     const lastPrice = snapshot!.price;
     
     // Avoid division by zero
