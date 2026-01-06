@@ -1,7 +1,6 @@
 // predictive/rescorer.ts: Predictive HF re-scoring using cached prices
 // Re-scores users' health factors when Pyth prices update
 
-import { getUsdPriceForPrediction } from '../prices/priceMath.js';
 import type { HealthFactorChecker } from '../risk/HealthFactorChecker.js';
 import type { ActiveRiskSet } from '../risk/ActiveRiskSet.js';
 import { config } from '../config/index.js';

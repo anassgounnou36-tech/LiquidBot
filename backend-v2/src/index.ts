@@ -209,7 +209,6 @@ async function main() {
     const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
     
     // Update risk set with fresh HFs
-    let watchedCount = 0;
     let dustLiquidatableCount = 0;
     
     for (const result of results) {
@@ -217,7 +216,6 @@ async function main() {
       
       // Log watched/actionable users (HF < threshold AND debt >= MIN_DEBT_USD)
       if (result.healthFactor < config.HF_THRESHOLD_START && result.debtUsd1e18 >= minDebtUsd1e18) {
-        watchedCount++;
         const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;
         console.log(
           `[v2] Watched user: ${result.address} HF=${result.healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)}`
