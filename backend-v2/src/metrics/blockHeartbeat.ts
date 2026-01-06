@@ -47,6 +47,7 @@ export function logHeartbeat(blockNumber: number, riskSet: ActiveRiskSet): void 
   
   // Find minimum HF among watched (below-threshold) users only
   let minHF: number | null = null;
+  let minHFUser: string | null = null;
   for (const user of belowThreshold) {
     const hf = user.healthFactor;
     
@@ -55,6 +56,7 @@ export function logHeartbeat(blockNumber: number, riskSet: ActiveRiskSet): void 
     
     if (minHF === null || hf < minHF) {
       minHF = hf;
+      minHFUser = user.address;
     }
   }
   
@@ -74,8 +76,9 @@ export function logHeartbeat(blockNumber: number, riskSet: ActiveRiskSet): void 
       `[heartbeat] block=${blockNumber} ` +
       `riskSet=${allUsers.length} ` +
       `belowThreshold=${belowThreshold.length} ` +
-      `minHF=${minHF !== null ? minHF.toFixed(4) : 'N/A'} ` +
-      `priceHits(+listener=0,+local=0,+rpc=0)`
+      `minHF=${minHF !== null ? minHF.toFixed(4) : 'N/A'}` +
+      (config.LOG_MINHF_USER && minHFUser ? ` user=${minHFUser}` : '') +
+      ` priceHits(+listener=0,+local=0,+rpc=0)`
     );
     return;
   }
@@ -99,7 +102,8 @@ export function logHeartbeat(blockNumber: number, riskSet: ActiveRiskSet): void 
     `[heartbeat] block=${blockNumber} ` +
     `riskSet=${allUsers.length} ` +
     `belowThreshold=${belowThreshold.length} ` +
-    `minHF=${minHF !== null ? minHF.toFixed(4) : 'N/A'} ` +
-    `priceHits(+listener=${deltaCounters.listenerHits},+local=${deltaCounters.localHits},+rpc=${deltaCounters.rpcFallbacks})`
+    `minHF=${minHF !== null ? minHF.toFixed(4) : 'N/A'}` +
+    (config.LOG_MINHF_USER && minHFUser ? ` user=${minHFUser}` : '') +
+    ` priceHits(+listener=${deltaCounters.listenerHits},+local=${deltaCounters.localHits},+rpc=${deltaCounters.rpcFallbacks})`
   );
 }

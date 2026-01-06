@@ -98,7 +98,7 @@ export class AavePoolListeners {
       interestRateMode: number,
       borrowRate: bigint,
       referralCode: number,
-      event: ethers.Log
+      event: ethers.ContractEventPayload
     ) => {
       const affected = onBehalfOf.toLowerCase();
       const watched = this.activeRiskSet.has(affected);
@@ -107,11 +107,11 @@ export class AavePoolListeners {
         this.dirtyQueue.markDirty(affected);
       }
       
-      // Log event trace if enabled
+      // Log event trace if enabled (ethers v6: use event.log for actual Log data)
       logEventTrace(
         'Borrow',
-        event.blockNumber,
-        event.transactionHash || '0x',
+        event.log.blockNumber,
+        event.log.transactionHash,
         affected,
         reserve,
         watched
@@ -127,7 +127,7 @@ export class AavePoolListeners {
       repayer: string, 
       amount: bigint, 
       useATokens: boolean,
-      event: ethers.Log
+      event: ethers.ContractEventPayload
     ) => {
       const affected = user.toLowerCase();
       const watched = this.activeRiskSet.has(affected);
@@ -136,11 +136,11 @@ export class AavePoolListeners {
         this.dirtyQueue.markDirty(affected);
       }
       
-      // Log event trace if enabled
+      // Log event trace if enabled (ethers v6: use event.log for actual Log data)
       logEventTrace(
         'Repay',
-        event.blockNumber,
-        event.transactionHash || '0x',
+        event.log.blockNumber,
+        event.log.transactionHash,
         affected,
         reserve,
         watched
@@ -156,7 +156,7 @@ export class AavePoolListeners {
       onBehalfOf: string, 
       amount: bigint,
       referralCode: number,
-      event: ethers.Log
+      event: ethers.ContractEventPayload
     ) => {
       const affected = onBehalfOf.toLowerCase();
       const watched = this.activeRiskSet.has(affected);
@@ -165,11 +165,11 @@ export class AavePoolListeners {
         this.dirtyQueue.markDirty(affected);
       }
       
-      // Log event trace if enabled
+      // Log event trace if enabled (ethers v6: use event.log for actual Log data)
       logEventTrace(
         'Supply',
-        event.blockNumber,
-        event.transactionHash || '0x',
+        event.log.blockNumber,
+        event.log.transactionHash,
         affected,
         reserve,
         watched
@@ -184,7 +184,7 @@ export class AavePoolListeners {
       user: string, 
       to: string, 
       amount: bigint,
-      event: ethers.Log
+      event: ethers.ContractEventPayload
     ) => {
       const affected = user.toLowerCase();
       const watched = this.activeRiskSet.has(affected);
@@ -193,11 +193,11 @@ export class AavePoolListeners {
         this.dirtyQueue.markDirty(affected);
       }
       
-      // Log event trace if enabled
+      // Log event trace if enabled (ethers v6: use event.log for actual Log data)
       logEventTrace(
         'Withdraw',
-        event.blockNumber,
-        event.transactionHash || '0x',
+        event.log.blockNumber,
+        event.log.transactionHash,
         affected,
         reserve,
         watched

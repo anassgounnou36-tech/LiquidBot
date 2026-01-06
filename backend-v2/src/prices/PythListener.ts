@@ -38,6 +38,9 @@ export class PythListener {
   private shouldReconnect = true;
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private lastMessageTime = 0;
+  
+  // Internal price cache: symbol -> { price1e18: bigint, timestamp: number, publishTime: number }
+  private priceCache = new Map<string, { price1e18: bigint; timestamp: number; publishTime: number }>();
 
   constructor() {
     this.wsUrl = config.PYTH_WS_URL;
@@ -229,6 +232,9 @@ export class PythListener {
       const priceValue = Number(price.price) * Math.pow(10, Number(price.expo));
       const confidence = price.conf ? Number(price.conf) * Math.pow(10, Number(price.expo)) : undefined;
 
+      // Convert to 1e18 BigInt for cache (consistent with priceMath)
+      const price1e18 = BigInt(Math.floor(priceValue * 1e18));
+
       // Check staleness
       const now = Math.floor(Date.now() / 1000);
       const ageSec = now - publishTime;
@@ -239,6 +245,13 @@ export class PythListener {
           `[pyth-listener] STALE price for ${symbol}: age=${ageSec}s (threshold=${this.staleSecs}s)`
         );
       }
+
+      // Update internal cache
+      this.priceCache.set(symbol.toUpperCase(), {
+        price1e18,
+        timestamp: Date.now(),
+        publishTime
+      });
 
       // Create update object
       const update: PythPriceUpdate = {
@@ -314,5 +327,39 @@ export class PythListener {
         this.connect();
       }
     }, Math.min(delay, 60000)); // Max 1 minute delay
+  }
+
+  /**
+   * Get cached price in 1e18 format
+   * Returns null if not cached or symbol not found
+   */
+  getPrice1e18(symbol: string): bigint | null {
+    const normalized = symbol.toUpperCase();
+    const cached = this.priceCache.get(normalized);
+    return cached ? cached.price1e18 : null;
+  }
+
+  /**
+   * Check if cached price is fresh (within staleSecs threshold)
+   * Returns false if not cached or symbol not found
+   */
+  isFresh(symbol: string): boolean {
+    const normalized = symbol.toUpperCase();
+    const cached = this.priceCache.get(normalized);
+    if (!cached) return false;
+    
+    const now = Math.floor(Date.now() / 1000);
+    const age = now - cached.publishTime;
+    return age <= this.staleSecs;
+  }
+
+  /**
+   * Get last update timestamp (local receipt time, not publishTime)
+   * Returns 0 if not cached or symbol not found
+   */
+  getLastUpdateTs(symbol: string): number {
+    const normalized = symbol.toUpperCase();
+    const cached = this.priceCache.get(normalized);
+    return cached ? cached.timestamp : 0;
   }
 }

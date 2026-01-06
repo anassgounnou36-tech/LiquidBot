@@ -4,6 +4,7 @@ import { seedBorrowerUniverse, DEFAULT_UNIVERSE_MAX_CANDIDATES } from './subgrap
 import { ActiveRiskSet } from './risk/ActiveRiskSet.js';
 import { HealthFactorChecker } from './risk/HealthFactorChecker.js';
 import { ChainlinkListener } from './prices/ChainlinkListener.js';
+import { PythListener } from './prices/PythListener.js';
 import { TelegramNotifier } from './notify/TelegramNotifier.js';
 import { config } from './config/index.js';
 import { DirtyQueue } from './realtime/dirtyQueue.js';
@@ -13,7 +14,7 @@ import { ExecutorClient } from './execution/executorClient.js';
 import { OneInchSwapBuilder } from './execution/oneInch.js';
 import { AttemptHistory } from './execution/attemptHistory.js';
 import { LiquidationAudit } from './audit/liquidationAudit.js';
-import { initChainlinkFeeds, initChainlinkFeedsByAddress, initAddressToSymbolMapping, updateCachedPrice, cacheTokenDecimals, setChainlinkListener, resolveEthUsdFeedAddress, getNormalizedPriceFromFeed } from './prices/priceMath.js';
+import { initChainlinkFeeds, initChainlinkFeedsByAddress, initAddressToSymbolMapping, updateCachedPrice, cacheTokenDecimals, setChainlinkListener, setPythListener, resolveEthUsdFeedAddress, getNormalizedPriceFromFeed } from './prices/priceMath.js';
 import { LiquidationPlanner } from './execution/liquidationPlanner.js';
 import { ProtocolDataProvider } from './aave/protocolDataProvider.js';
 import { metrics } from './metrics/metrics.js';
@@ -84,9 +85,12 @@ async function main() {
     // 3. Setup price oracles (Chainlink only, Pyth disabled)
     console.log('[v2] Phase 3: Setting up price oracles');
     
-    // Pyth is disabled in this version
-    console.log('[v2] ⚠️  Pyth price feeds are DISABLED in this version');
-    console.log('[v2] Using Chainlink feeds only for price data');
+    // Check if Pyth is enabled
+    const pythEnabled = config.PYTH_ENABLED;
+    if (!pythEnabled) {
+      console.log('[v2] ⚠️  Pyth price feeds are DISABLED (PYTH_ENABLED=false)');
+      console.log('[v2] Using Chainlink feeds only for price data');
+    }
     
     const chainlinkListener = new ChainlinkListener();
     
@@ -143,7 +147,19 @@ async function main() {
     // Start Chainlink listener
     await chainlinkListener.start();
     
-    console.log('[v2] Price oracles configured (Chainlink only)');
+    console.log('[v2] Chainlink price oracle configured');
+    
+    // Start Pyth listener if enabled (for prediction/re-scoring only)
+    let pythListener: PythListener | null = null;
+    if (pythEnabled) {
+      console.log('[v2] Starting Pyth listener for predictive re-scoring...');
+      pythListener = new PythListener();
+      await pythListener.start();
+      setPythListener(pythListener);
+      console.log('[v2] ✅ Pyth price feeds ENABLED for prediction (Chainlink remains execution authority)');
+    }
+    
+    console.log('[v2] Price oracles configured');
     
     // Ensure ETH/WETH price is ready before Phase 4 scan to avoid cache misses
     console.log('[v2] Ensuring ETH/WETH price readiness...');
@@ -561,6 +577,9 @@ async function main() {
       verifierLoop.stop();
       aaveListeners.stop();
       liquidationAudit.stop();
+      if (pythListener) {
+        await pythListener.stop();
+      }
       await notifier.notify('🛑 <b>LiquidBot v2 Stopped</b>');
       process.exit(0);
     });
@@ -570,6 +589,9 @@ async function main() {
       verifierLoop.stop();
       aaveListeners.stop();
       liquidationAudit.stop();
+      if (pythListener) {
+        await pythListener.stop();
+      }
       await notifier.notify('🛑 <b>LiquidBot v2 Stopped</b>');
       process.exit(0);
     });

@@ -1,6 +1,7 @@
 // execution/txBroadcaster.ts: Multi-RPC broadcast with transaction replacement
 
 import { ethers, TransactionReceipt } from 'ethers';
+import { config } from '../config/index.js';
 
 /**
  * Broadcast result with status discrimination
@@ -37,16 +38,19 @@ export class TxBroadcaster {
   constructor(options: BroadcastOptions) {
     this.options = {
       rpcUrls: options.rpcUrls,
-      replacementDelayMs: options.replacementDelayMs || 3000,
-      maxReplacements: options.maxReplacements || 3,
-      priorityFeeBumpPercent: options.priorityFeeBumpPercent || 20
+      replacementDelayMs: options.replacementDelayMs || config.REPLACE_AFTER_MS,
+      maxReplacements: options.maxReplacements || config.REPLACE_MAX_ATTEMPTS,
+      priorityFeeBumpPercent: options.priorityFeeBumpPercent || config.FEE_BUMP_PCT
     };
 
     // Create providers once during initialization to avoid per-tx overhead
     this.providers = this.options.rpcUrls.map(url => new ethers.JsonRpcProvider(url));
     this.monitorProvider = this.providers[0];
     
-    console.log(`[txBroadcaster] Initialized with ${this.providers.length} RPC providers`);
+    console.log(
+      `[txBroadcaster] Initialized with ${this.providers.length} RPC providers ` +
+      `(delay=${this.options.replacementDelayMs}ms, maxAttempts=${this.options.maxReplacements}, bump=${this.options.priorityFeeBumpPercent}%)`
+    );
   }
 
   /**
