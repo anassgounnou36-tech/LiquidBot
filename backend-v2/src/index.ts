@@ -279,12 +279,7 @@ async function main() {
       hfChecker,
       riskSet
     );
-    
-    // Wire execution components for plan preparation
-    const liquidationPlanner = new LiquidationPlanner(config.AAVE_PROTOCOL_DATA_PROVIDER);
-    const oneInchBuilder = new OneInchSwapBuilder(8453); // Base chain ID
-    predictiveLoop.setExecutionComponents(liquidationPlanner, oneInchBuilder);
-    
+    // Note: Execution components will be wired after they're created in Phase 6
     predictiveLoop.start();
     console.log('[v2] PredictiveLoop started\n');
 
@@ -319,6 +314,10 @@ async function main() {
     const oneInchBuilder = new OneInchSwapBuilder(8453); // Base chain ID
     const liquidationPlanner = new LiquidationPlanner(config.AAVE_PROTOCOL_DATA_PROVIDER);
     const attemptHistory = new AttemptHistory();
+    
+    // Wire execution components to PredictiveLoop for plan preparation
+    predictiveLoop.setExecutionComponents(liquidationPlanner, oneInchBuilder);
+    console.log('[v2] Execution components wired to PredictiveLoop');
     
     console.log(`[v2] Executor client initialized (address=${executorClient.getAddress()})`);
     console.log(`[v2] Wallet address: ${executorClient.getWalletAddress()}`);
@@ -366,44 +365,8 @@ async function main() {
             return;
           }
           
-          // Check if we have a prepared plan
-          const preparedPlan = predictiveLoop.getPlanCache().get(user);
-          let candidates;
-          
-          if (preparedPlan) {
-            console.log(`[execute] Using prepared plan for ${user.substring(0, 10)}...`);
-            // Convert prepared plan to candidate format
-            candidates = [{
-              debtAsset: preparedPlan.debtAsset,
-              collateralAsset: preparedPlan.collateralAsset,
-              debtToCover: preparedPlan.debtToCover,
-              expectedCollateralOut: preparedPlan.expectedCollateralOut,
-              oracleScore: preparedPlan.score,
-              debtAssetDecimals: 18, // Will be filled in by planner if needed
-              collateralAssetDecimals: 18,
-              liquidationBonusBps: 500 // Placeholder
-            }];
-          } else {
-            console.log(`[execute] Building fresh plan for ${user.substring(0, 10)}...`);
-            // Build candidate plans (up to 3)
-            try {
-              candidates = await liquidationPlanner.buildCandidatePlans(user);
-            } catch (err) {
-              console.error(
-                `[execute] Failed to build liquidation plans for ${user}:`,
-                err instanceof Error ? err.message : err
-              );
-              attemptHistory.record({
-                user,
-                timestamp: Date.now(),
-                status: 'error',
-                error: err instanceof Error ? err.message : String(err)
-              });
-              return;
-            }
-          }
-          
           // Build candidate plans (up to 3)
+          let candidates;
           try {
             candidates = await liquidationPlanner.buildCandidatePlans(user);
           } catch (err) {
@@ -430,7 +393,7 @@ async function main() {
             return;
           }
           
-          console.log(`[execute] Using ${preparedPlan ? 'prepared' : 'fresh'} plan with ${candidates.length} candidate(s) for user=${user}`);
+          console.log(`[execute] Built ${candidates.length} candidate plans for user=${user}`);
           
           if (!executionEnabled) {
             // DRY RUN mode: log only
@@ -450,20 +413,9 @@ async function main() {
             return;
           }
           
-          // REAL EXECUTION PATH: Quote-based candidate selection (unless we have prepared plan)
+          // REAL EXECUTION PATH: Quote-based candidate selection
           try {
-            let chosen;
-            let swapData;
-            let minOut;
-            
-            if (preparedPlan) {
-              // Use prepared plan data
-              chosen = candidates[0];
-              swapData = preparedPlan.oneInchCalldata;
-              minOut = preparedPlan.minOut;
-              console.log(`[execute] ⭐ Using prepared plan: usingPreparedPlan=true`);
-            } else {
-              // Quote each candidate and compute netDebtToken
+            // Quote each candidate and compute netDebtToken
             const quotedCandidates: Array<{
               candidate: typeof candidates[0];
               minOut: bigint;
