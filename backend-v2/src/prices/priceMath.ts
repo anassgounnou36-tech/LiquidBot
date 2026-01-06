@@ -4,6 +4,7 @@ import { ethers } from 'ethers';
 import { getHttpProvider } from '../providers/rpc.js';
 import { config } from '../config/index.js';
 import type { ChainlinkListener } from './ChainlinkListener.js';
+import type { PythListener } from './PythListener.js';
 
 /**
  * Chainlink decimals cache
@@ -46,6 +47,11 @@ const tokenDecimalsCache = new Map<string, number>();
  * ChainlinkListener instance for cache-first price lookups
  */
 let chainlinkListenerInstance: ChainlinkListener | null = null;
+
+/**
+ * PythListener instance for predictive price lookups
+ */
+let pythListenerInstance: PythListener | null = null;
 
 /**
  * Cache miss warning cooldown (symbol -> last warn timestamp)
@@ -142,6 +148,14 @@ export function initPythFeeds(feeds: Record<string, string>): void {
 export function setChainlinkListener(listener: ChainlinkListener): void {
   chainlinkListenerInstance = listener;
   console.log('[priceMath] ChainlinkListener instance registered for cache-first lookups');
+}
+
+/**
+ * Set PythListener instance for predictive price lookups
+ */
+export function setPythListener(listener: PythListener): void {
+  pythListenerInstance = listener;
+  console.log('[priceMath] PythListener instance registered for predictive lookups');
 }
 
 /**
@@ -644,6 +658,44 @@ export async function getNormalizedPriceFromFeed(feedAddress: string): Promise<b
     const exponent = decimals - 18;
     return price / (10n ** BigInt(exponent));
   }
+}
+
+/**
+ * Get USD price for prediction (token-aware, Pyth-first if enabled)
+ * Order: ChainlinkListener cache → PythListener cache (if enabled + fresh) → local TTL → RPC fallback
+ * This is the preferred path for predictive re-scoring to use Pyth data
+ * 
+ * @param symbol Asset symbol (e.g., "WETH", "USDC")
+ * @returns Promise<bigint> Normalized price as 1e18 BigInt
+ */
+export async function getUsdPriceForPrediction(symbol: string): Promise<bigint> {
+  const normalizedSymbol = symbol.toUpperCase();
+
+  // LAYER 1: Check ChainlinkListener cache first (most authoritative for execution)
+  const feedAddress = chainlinkFeedAddresses.get(normalizedSymbol);
+  if (feedAddress && chainlinkListenerInstance) {
+    const cachedPrice = chainlinkListenerInstance.getCachedPrice(feedAddress);
+    if (cachedPrice !== null) {
+      return cachedPrice;
+    }
+  }
+
+  // LAYER 2: Check PythListener cache if enabled and fresh
+  if (config.PYTH_ENABLED && pythListenerInstance) {
+    const pythPrice = pythListenerInstance.getPrice1e18(normalizedSymbol);
+    if (pythPrice !== null && pythListenerInstance.isFresh(normalizedSymbol)) {
+      return pythPrice;
+    }
+  }
+
+  // LAYER 3: Check local price cache with TTL
+  const localCached = getLocalCachedPrice(normalizedSymbol, config.PRICE_CACHE_TTL_MS);
+  if (localCached !== null) {
+    return localCached;
+  }
+
+  // LAYER 4: Fallback to standard getUsdPrice (which uses RPC)
+  return getUsdPrice(normalizedSymbol);
 }
 
 /**

@@ -71,6 +71,14 @@ const envSchema = z.object({
   PYTH_ASSETS: commaSeparatedString.default('WETH,USDC,WBTC'),
   PYTH_STALE_SECS: z.coerce.number().min(10).default(60),
   PYTH_FEED_IDS_JSON: optionalJsonString(z.record(z.string(), z.string())),
+  
+  // Pyth predictive loop enablement
+  PYTH_ENABLED: z.string().transform(val => val === 'true').default('false'),
+  PYTH_MIN_PCT_MOVE_DEFAULT: z.coerce.number().min(0).default(0.0005),
+  PYTH_MIN_PCT_MOVE_JSON: optionalJsonString(z.record(z.string(), z.coerce.number())),
+  
+  // Predictive re-scoring configuration
+  PREDICT_MIN_RESCORE_INTERVAL_MS: z.coerce.number().min(100).default(500),
 
   // Price cache configuration
   PRICE_CACHE_TTL_MS: z.coerce.number().min(1000).max(60000).default(8000),
@@ -93,6 +101,9 @@ const envSchema = z.object({
 
   // Dust liquidatable logging (HF < 1.0 but debt < MIN_DEBT_USD)
   LOG_DUST_LIQUIDATABLE: z.string().transform(val => val === 'true').default('false'),
+  
+  // MinHF user logging (log which user has minimum HF)
+  LOG_MINHF_USER: z.string().transform(val => val === 'true').default('false'),
 });
 
 export type Env = z.infer<typeof envSchema>;
