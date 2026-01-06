@@ -66,9 +66,9 @@ export class Rescorer {
       
       this.riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18);
       
-      // Check if user needs execution
+      // Check if user meets execution criteria (HF ≤ threshold AND debt ≥ minimum)
       if (result.healthFactor <= config.HF_THRESHOLD_EXECUTE && result.debtUsd1e18 >= this.minDebtUsd1e18) {
-        return true; // Needs execution
+        return true; // User meets execution criteria
       }
       
       return false;

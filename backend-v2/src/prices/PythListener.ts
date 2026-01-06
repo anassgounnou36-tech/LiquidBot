@@ -233,6 +233,8 @@ export class PythListener {
       const confidence = price.conf ? Number(price.conf) * Math.pow(10, Number(price.expo)) : undefined;
 
       // Convert to 1e18-scaled BigInt for cache
+      // Note: Math.floor precision is acceptable for USD prices at 1e18 scale
+      // Pyth prices already have sufficient precision from expo conversion
       const price1e18 = BigInt(Math.floor(priceValue * 1e18));
 
       // Update price cache

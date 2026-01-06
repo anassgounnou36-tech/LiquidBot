@@ -89,9 +89,15 @@ export class PredictiveLoop {
     const symbol = update.symbol.toUpperCase();
     const price1e18 = BigInt(Math.floor(update.price * 1e18));
     
+    // Validate price is positive
+    if (price1e18 <= 0n) {
+      console.warn(`[predictive-loop] Invalid price for ${symbol}: ${price1e18.toString()}`);
+      return;
+    }
+    
     // Check if price moved significantly
     const lastPrice = this.lastPrices.get(symbol);
-    if (lastPrice) {
+    if (lastPrice && lastPrice > 0n) {
       const minPctMove = this.minPctMoveBySymbol.get(symbol) || this.minPctMoveDefault;
       
       // Calculate percentage move using BigInt to avoid precision loss
