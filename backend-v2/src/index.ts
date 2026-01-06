@@ -4,6 +4,7 @@ import { seedBorrowerUniverse, DEFAULT_UNIVERSE_MAX_CANDIDATES } from './subgrap
 import { ActiveRiskSet } from './risk/ActiveRiskSet.js';
 import { HealthFactorChecker } from './risk/HealthFactorChecker.js';
 import { ChainlinkListener } from './prices/ChainlinkListener.js';
+import { PythListener } from './prices/PythListener.js';
 import { TelegramNotifier } from './notify/TelegramNotifier.js';
 import { config } from './config/index.js';
 import { DirtyQueue } from './realtime/dirtyQueue.js';
@@ -13,13 +14,17 @@ import { ExecutorClient } from './execution/executorClient.js';
 import { OneInchSwapBuilder } from './execution/oneInch.js';
 import { AttemptHistory } from './execution/attemptHistory.js';
 import { LiquidationAudit } from './audit/liquidationAudit.js';
-import { initChainlinkFeeds, initChainlinkFeedsByAddress, initAddressToSymbolMapping, updateCachedPrice, cacheTokenDecimals, setChainlinkListener, resolveEthUsdFeedAddress, getNormalizedPriceFromFeed } from './prices/priceMath.js';
+import { initChainlinkFeeds, initChainlinkFeedsByAddress, initAddressToSymbolMapping, updateCachedPrice, cacheTokenDecimals, setChainlinkListener, setPythListener, resolveEthUsdFeedAddress, getNormalizedPriceFromFeed } from './prices/priceMath.js';
 import { LiquidationPlanner } from './execution/liquidationPlanner.js';
 import { ProtocolDataProvider } from './aave/protocolDataProvider.js';
 import { metrics } from './metrics/metrics.js';
 import { computeNetDebtToken } from './execution/safety.js';
 import { logHeartbeat } from './metrics/blockHeartbeat.js';
 import { getWsProvider } from './providers/ws.js';
+import { UserIndex } from './predictive/userIndex.js';
+import { Rescorer } from './predictive/rescorer.js';
+import { PlanCache } from './predictive/planCache.js';
+import { PredictiveLoop } from './predictive/loop.js';
 
 // 1inch swap slippage tolerance
 // Should be adjusted based on market conditions and token pair liquidity
@@ -81,12 +86,19 @@ async function main() {
     
     console.log(`[v2] Protocol data cached: ${allReserves.length} reserves\n`);
     
-    // 3. Setup price oracles (Chainlink only, Pyth disabled)
+    // 3. Setup price oracles (Chainlink + optional Pyth)
     console.log('[v2] Phase 3: Setting up price oracles');
     
-    // Pyth is disabled in this version
-    console.log('[v2] ⚠️  Pyth price feeds are DISABLED in this version');
-    console.log('[v2] Using Chainlink feeds only for price data');
+    // Initialize Pyth listener if enabled
+    let pythListener: PythListener | null = null;
+    if (config.PYTH_ENABLED) {
+      console.log('[v2] ✅ Pyth price feeds ENABLED for predictive loop');
+      pythListener = new PythListener();
+      await pythListener.start();
+      setPythListener(pythListener);
+    } else {
+      console.log('[v2] ⚠️  Pyth price feeds DISABLED (set PYTH_ENABLED=true to enable)');
+    }
     
     const chainlinkListener = new ChainlinkListener();
     
@@ -143,7 +155,7 @@ async function main() {
     // Start Chainlink listener
     await chainlinkListener.start();
     
-    console.log('[v2] Price oracles configured (Chainlink only)');
+    console.log(`[v2] Price oracles configured (Chainlink${config.PYTH_ENABLED ? ' + Pyth' : ' only'})`);
     
     // Ensure ETH/WETH price is ready before Phase 4 scan to avoid cache misses
     console.log('[v2] Ensuring ETH/WETH price readiness...');
@@ -533,6 +545,43 @@ async function main() {
     verifierLoop.start();
     console.log('[v2] Verifier loop started\n');
 
+    // 8.5. Setup predictive loop (if Pyth enabled)
+    if (config.PYTH_ENABLED && pythListener) {
+      console.log('[v2] Phase 8.5: Setting up predictive loop');
+      
+      // Create predictive components
+      const userIndex = new UserIndex(riskSet);
+      const rescorer = new Rescorer(hfChecker, riskSet);
+      const planCache = new PlanCache(liquidationPlanner);
+      
+      // Create predictive loop with execution callback
+      const predictiveLoop = new PredictiveLoop(
+        pythListener,
+        userIndex,
+        rescorer,
+        planCache,
+        async (user: string, healthFactor: number, debtUsd1e18: bigint) => {
+          // This callback is triggered when predictive re-scoring detects HF ≤ 1.0
+          // For now, we rely on the verifier loop to handle execution
+          // Future enhancement: direct execution from predictive loop
+          console.log(
+            `[predictive] User ${user} needs execution: HF=${healthFactor.toFixed(4)} debt=$${(Number(debtUsd1e18) / 1e18).toFixed(2)}`
+          );
+        }
+      );
+      
+      // Start predictive loop
+      predictiveLoop.start();
+      
+      console.log('[v2] Predictive loop started (Pyth-driven re-scoring enabled)\n');
+      
+      // TODO: Build initial userIndex from riskSet
+      // This would require querying user positions to get their tokens
+      // For now, the index will be populated as users are re-scored
+    } else {
+      console.log('[v2] Predictive loop DISABLED (PYTH_ENABLED=false)\n');
+    }
+
     // 9. Setup block heartbeat (if enabled)
     if (config.LOG_BLOCK_HEARTBEAT) {
       console.log('[v2] Phase 9: Setting up block heartbeat');
@@ -561,6 +610,9 @@ async function main() {
       verifierLoop.stop();
       aaveListeners.stop();
       liquidationAudit.stop();
+      if (pythListener) {
+        await pythListener.stop();
+      }
       await notifier.notify('🛑 <b>LiquidBot v2 Stopped</b>');
       process.exit(0);
     });
@@ -570,6 +622,9 @@ async function main() {
       verifierLoop.stop();
       aaveListeners.stop();
       liquidationAudit.stop();
+      if (pythListener) {
+        await pythListener.stop();
+      }
       await notifier.notify('🛑 <b>LiquidBot v2 Stopped</b>');
       process.exit(0);
     });
