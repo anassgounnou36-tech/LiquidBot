@@ -24,6 +24,12 @@ export class UserIndex {
   /**
    * Update the tokens associated with a user
    * 
+   * NOTE: Current implementation is additive - tokens are added but not removed.
+   * This is intentional for the minimal implementation where all users are indexed
+   * with the same fixed set of common tokens. When per-user token extraction is
+   * implemented, this method should be enhanced to replace existing associations
+   * rather than accumulate them.
+   * 
    * @param userAddress User address (will be normalized to lowercase)
    * @param tokenAddresses Array of token addresses that the user has exposure to
    *                       (includes both collateral and debt tokens, plus anchors)

@@ -168,6 +168,10 @@ export class PredictiveLoop {
     console.log(`[predict] Found ${affectedUsers.size} affected users for ${update.symbol}`);
     
     // Rate-limit and rescore affected users
+    // TODO: Performance optimization - Consider batch rescoring using hfChecker.checkBatch()
+    // when many users are affected. Current implementation uses sequential rescoring with
+    // rate limiting which is acceptable for MVP but could be optimized for high-frequency
+    // price updates affecting many users.
     const now = Date.now();
     let rescoredCount = 0;
     
