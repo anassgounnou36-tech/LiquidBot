@@ -120,20 +120,25 @@ export class PredictiveLoop {
 
   /**
    * Check price movement for a single token and trigger re-checks if threshold exceeded
+   * 
+   * NOTE: This implementation requires token address → symbol resolution integration.
+   * To complete this feature:
+   * 1. Import and use addressToSymbolMap from priceMath
+   * 2. Call getUsdPriceForPrediction(symbol) after resolving token address to symbol
+   * 3. Populate UserIndex with user-token relationships from ProtocolDataProvider
+   * 4. Start this loop in index.ts after Phase 5 (realtime triggers are set up)
    */
   private async checkTokenPriceMovement(tokenAddress: string): Promise<void> {
     // Get current price (using prediction path: Chainlink → Pyth → cache → RPC)
     let currentPrice: bigint;
     try {
-      // We need the symbol to look up the price - for now, we'll skip tokens we can't resolve
-      // In production, this would use addressToSymbolMapping from priceMath
-      // For this implementation, we'll use a placeholder that returns early
-      // Real implementation would integrate with protocolDataProvider
-      return;
-      
-      // Placeholder for future implementation:
-      // const symbol = await resolveTokenAddressToSymbol(tokenAddress);
+      // TODO: Implement token address → symbol resolution
+      // const symbol = addressToSymbolMap.get(tokenAddress.toLowerCase());
+      // if (!symbol) return;
       // currentPrice = await getUsdPriceForPrediction(symbol);
+      
+      // For now, skip - requires integration with protocol data provider
+      return;
     } catch (err) {
       // Price fetch failed - skip this token for now
       return;
