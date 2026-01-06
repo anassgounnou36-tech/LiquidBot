@@ -85,6 +85,9 @@ const envSchema = z.object({
   PREDICT_MIN_RESCORE_INTERVAL_MS: z.coerce.number().min(100).max(10000).default(500),
   PLAN_TTL_MS: z.coerce.number().min(1000).max(60000).default(15000),
   PLAN_MAX_USERS: z.coerce.number().min(100).max(10000).default(2000),
+  
+  // UserIndex refresh throttle configuration
+  INDEX_REFRESH_MS: z.coerce.number().min(1000).max(300000).default(30000),
 
   // Price cache configuration
   PRICE_CACHE_TTL_MS: z.coerce.number().min(1000).max(60000).default(8000),

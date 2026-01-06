@@ -115,7 +115,7 @@ export class ActiveRiskSet {
       if (this.userIndex && this.dataProvider) {
         const now = Date.now();
         const lastRefresh = candidate.lastIndexRefresh || 0;
-        const INDEX_REFRESH_THROTTLE_MS = 30000; // 30 seconds
+        const INDEX_REFRESH_THROTTLE_MS = config.INDEX_REFRESH_MS;
         
         // Only refresh if enough time has passed
         if (now - lastRefresh >= INDEX_REFRESH_THROTTLE_MS) {
