@@ -1,0 +1,205 @@
+// predictive/PredictiveLoop.ts: Pyth-driven predictive liquidation loop
+// Subscribes to Pyth price updates and triggers targeted rescoring
+
+import type { PythListener, PythPriceUpdate } from '../prices/PythListener.js';
+import type { UserIndex } from './UserIndex.js';
+import type { HealthFactorChecker } from '../risk/HealthFactorChecker.js';
+import type { ActiveRiskSet } from '../risk/ActiveRiskSet.js';
+import { config } from '../config/index.js';
+
+/**
+ * PredictiveLoop: Monitor Pyth price updates and trigger predictive rescoring
+ * 
+ * Flow:
+ * 1. Subscribe to PythListener updates
+ * 2. On each tick, compute % price move vs last cached price
+ * 3. If movement exceeds threshold, fetch affected users from UserIndex
+ * 4. Rate-limit and rescore those users
+ * 5. If projected HF < prepare threshold, prepare execution plan (TODO: Part 2)
+ * 6. If on-chain HF ≤ 1, execute immediately (existing verifier loop handles this)
+ */
+export class PredictiveLoop {
+  private pythListener: PythListener;
+  private userIndex: UserIndex;
+  private hfChecker: HealthFactorChecker;
+  private riskSet: ActiveRiskSet;
+  
+  // Track last seen price for each token (lowercase address -> price)
+  private lastPrices: Map<string, number> = new Map();
+  
+  // Rate limiting: user address -> last rescore timestamp
+  private lastRescoreTime: Map<string, number> = new Map();
+  
+  // Per-token movement thresholds (lowercase address -> threshold)
+  private tokenThresholds: Map<string, number> = new Map();
+  
+  // Default threshold
+  private defaultThreshold: number;
+  
+  // Rate limit in ms
+  private rescoreRateLimitMs: number;
+  
+  // Prepare HF threshold (for future pre-submit plan caching)
+  private prepareHfThreshold: number;
+
+  constructor(
+    pythListener: PythListener,
+    userIndex: UserIndex,
+    hfChecker: HealthFactorChecker,
+    riskSet: ActiveRiskSet
+  ) {
+    this.pythListener = pythListener;
+    this.userIndex = userIndex;
+    this.hfChecker = hfChecker;
+    this.riskSet = riskSet;
+    
+    // Load configuration
+    this.defaultThreshold = config.PYTH_MIN_PCT_MOVE_DEFAULT || 0.0005;
+    this.rescoreRateLimitMs = config.PREDICTIVE_RESCORE_RATE_LIMIT_MS || 5000;
+    this.prepareHfThreshold = config.PREDICTIVE_PREPARE_HF_THRESHOLD || 1.02;
+    
+    // Load per-token thresholds if configured
+    if (config.PYTH_MIN_PCT_MOVE_JSON) {
+      for (const [tokenAddress, threshold] of Object.entries(config.PYTH_MIN_PCT_MOVE_JSON)) {
+        if (typeof threshold === 'number') {
+          this.tokenThresholds.set(tokenAddress.toLowerCase(), threshold);
+        }
+      }
+    }
+    
+    console.log(
+      `[predict] PredictiveLoop initialized: ` +
+      `defaultThreshold=${this.defaultThreshold} ` +
+      `rescoreRateLimit=${this.rescoreRateLimitMs}ms ` +
+      `prepareHfThreshold=${this.prepareHfThreshold}`
+    );
+  }
+
+  /**
+   * Start listening to Pyth price updates
+   */
+  start(): void {
+    this.pythListener.onPriceUpdate((update) => {
+      this.handlePriceUpdate(update);
+    });
+    
+    console.log('[predict] PredictiveLoop started');
+  }
+
+  /**
+   * Handle a Pyth price update
+   */
+  private async handlePriceUpdate(update: PythPriceUpdate): Promise<void> {
+    // TODO: Map symbol to token address
+    // For now, we'll use symbol as a placeholder until we have proper address mapping
+    // In production, we'd need a symbol->address mapping from the protocol data
+    const tokenKey = update.symbol.toLowerCase();
+    
+    // Get last price
+    const lastPrice = this.lastPrices.get(tokenKey);
+    
+    // Update last price
+    this.lastPrices.set(tokenKey, update.price);
+    
+    // If this is the first price for this token, skip movement calculation
+    if (lastPrice === undefined) {
+      console.log(`[predict] Initial price for ${update.symbol}: $${update.price.toFixed(2)}`);
+      return;
+    }
+    
+    // Compute % movement
+    const pctMove = Math.abs((update.price - lastPrice) / lastPrice);
+    
+    // Get threshold for this token
+    const threshold = this.tokenThresholds.get(tokenKey) || this.defaultThreshold;
+    
+    // Check if movement exceeds threshold
+    if (pctMove < threshold) {
+      // Below threshold - do nothing
+      return;
+    }
+    
+    // Log tick
+    console.log(
+      `[predict] tick token=${update.symbol} ` +
+      `price=$${update.price.toFixed(2)} ` +
+      `lastPrice=$${lastPrice.toFixed(2)} ` +
+      `pctMove=${(pctMove * 100).toFixed(3)}% ` +
+      `threshold=${(threshold * 100).toFixed(3)}%`
+    );
+    
+    // Get affected users from UserIndex
+    // TODO: In production, we need to map symbol to actual token address
+    // For now, this is a placeholder that will be enhanced when we have proper
+    // token address resolution from the protocol
+    const affectedUsers = this.userIndex.getUsersForToken(tokenKey);
+    
+    if (affectedUsers.size === 0) {
+      console.log(`[predict] No users indexed for token ${update.symbol}`);
+      return;
+    }
+    
+    console.log(`[predict] Found ${affectedUsers.size} affected users for ${update.symbol}`);
+    
+    // Rate-limit and rescore affected users
+    const now = Date.now();
+    let rescoredCount = 0;
+    
+    for (const userAddress of affectedUsers) {
+      // Check rate limit
+      const lastRescore = this.lastRescoreTime.get(userAddress);
+      if (lastRescore && (now - lastRescore) < this.rescoreRateLimitMs) {
+        // Skip - too soon since last rescore
+        continue;
+      }
+      
+      // Update rate limit timestamp
+      this.lastRescoreTime.set(userAddress, now);
+      
+      // Rescore this user
+      try {
+        await this.rescoreUser(userAddress);
+        rescoredCount++;
+      } catch (err) {
+        console.error(
+          `[predict] Error rescoring user ${userAddress}:`,
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
+    
+    console.log(`[predict] Rescored ${rescoredCount}/${affectedUsers.size} users for ${update.symbol}`);
+  }
+
+  /**
+   * Rescore a single user's health factor
+   */
+  private async rescoreUser(userAddress: string): Promise<void> {
+    // Check current HF from on-chain
+    const result = await this.hfChecker.checkSingle(userAddress);
+    
+    if (!result) {
+      console.warn(`[predict] No HF result for user ${userAddress}`);
+      return;
+    }
+    
+    // Update risk set with fresh HF
+    this.riskSet.updateHF(userAddress, result.healthFactor, result.debtUsd1e18);
+    
+    // Log if user is approaching liquidation
+    if (result.healthFactor < this.prepareHfThreshold) {
+      const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;
+      console.log(
+        `[predict] ⚠️  User approaching liquidation: ` +
+        `address=${userAddress} ` +
+        `HF=${result.healthFactor.toFixed(4)} ` +
+        `debtUsd=$${debtUsdDisplay.toFixed(2)}`
+      );
+      
+      // TODO: Part 2 - Prepare and cache execution plan here
+      // if (result.healthFactor < this.prepareHfThreshold) {
+      //   await this.prepareExecutionPlan(userAddress);
+      // }
+    }
+  }
+}

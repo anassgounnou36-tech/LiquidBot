@@ -4,6 +4,7 @@ import { seedBorrowerUniverse, DEFAULT_UNIVERSE_MAX_CANDIDATES } from './subgrap
 import { ActiveRiskSet } from './risk/ActiveRiskSet.js';
 import { HealthFactorChecker } from './risk/HealthFactorChecker.js';
 import { ChainlinkListener } from './prices/ChainlinkListener.js';
+import { PythListener } from './prices/PythListener.js';
 import { TelegramNotifier } from './notify/TelegramNotifier.js';
 import { config } from './config/index.js';
 import { DirtyQueue } from './realtime/dirtyQueue.js';
@@ -20,6 +21,8 @@ import { metrics } from './metrics/metrics.js';
 import { computeNetDebtToken } from './execution/safety.js';
 import { logHeartbeat } from './metrics/blockHeartbeat.js';
 import { getWsProvider } from './providers/ws.js';
+import { UserIndex } from './predictive/UserIndex.js';
+import { PredictiveLoop } from './predictive/PredictiveLoop.js';
 
 // 1inch swap slippage tolerance
 // Should be adjusted based on market conditions and token pair liquidity
@@ -88,6 +91,10 @@ async function main() {
     console.log('[v2] ⚠️  Pyth price feeds are DISABLED in this version');
     console.log('[v2] Using Chainlink feeds only for price data');
     
+    // PREDICTIVE LIQUIDATION: Enable Pyth listener for predictive pipeline
+    console.log('[v2] 🔮 Enabling Pyth for predictive liquidation pipeline');
+    const pythListener = new PythListener();
+    
     const chainlinkListener = new ChainlinkListener();
     
     // Collect all unique feed addresses to subscribe
@@ -145,6 +152,18 @@ async function main() {
     
     console.log('[v2] Price oracles configured (Chainlink only)');
     
+    // Wire Pyth listener to priceMath.updateCachedPrice()
+    pythListener.onPriceUpdate((update) => {
+      // Normalize Pyth price to 1e18 BigInt for cache
+      const price1e18 = BigInt(Math.floor(update.price * 1e18));
+      updateCachedPrice(update.symbol, price1e18);
+      console.log(`[v2] Pyth price updated: ${update.symbol} = $${update.price.toFixed(2)}`);
+    });
+    
+    // Start Pyth listener
+    await pythListener.start();
+    console.log('[v2] Pyth listener started for predictive pipeline');
+    
     // Ensure ETH/WETH price is ready before Phase 4 scan to avoid cache misses
     console.log('[v2] Ensuring ETH/WETH price readiness...');
     const ethFeedAddress = resolveEthUsdFeedAddress();
@@ -185,6 +204,12 @@ async function main() {
     // 4. Build initial active risk set with on-chain HF checks
     console.log('[v2] Phase 4: Building active risk set');
     const riskSet = new ActiveRiskSet();
+    
+    // Build UserIndex for predictive liquidation
+    const userIndex = new UserIndex();
+    riskSet.setUserIndex(userIndex);
+    console.log('[v2] UserIndex initialized and wired to ActiveRiskSet');
+    
     riskSet.addBulk(users);
     
     const hfChecker = new HealthFactorChecker();
@@ -197,7 +222,6 @@ async function main() {
     const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
     
     // Update risk set with fresh HFs
-    let watchedCount = 0;
     let dustLiquidatableCount = 0;
     
     for (const result of results) {
@@ -205,7 +229,6 @@ async function main() {
       
       // Log watched/actionable users (HF < threshold AND debt >= MIN_DEBT_USD)
       if (result.healthFactor < config.HF_THRESHOLD_START && result.debtUsd1e18 >= minDebtUsd1e18) {
-        watchedCount++;
         const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;
         console.log(
           `[v2] Watched user: ${result.address} HF=${result.healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)}`
@@ -241,7 +264,22 @@ async function main() {
       (config.LOG_DUST_LIQUIDATABLE ? ` dustLiquidatable=${dustLiquidatableCount}` : ' (dust log disabled)') +
       (minHF !== null ? ` minHF=${minHF.toFixed(4)}` : '')
     );
+    
+    // Log UserIndex statistics
+    const indexStats = userIndex.getStats();
+    console.log(`[predict] userIndex built: tokens=${indexStats.tokenCount} users=${indexStats.userCount}`);
     console.log();
+
+    // 4a. Setup PredictiveLoop for Pyth-driven rescoring
+    console.log('[v2] Phase 4a: Setting up predictive liquidation loop');
+    const predictiveLoop = new PredictiveLoop(
+      pythListener,
+      userIndex,
+      hfChecker,
+      riskSet
+    );
+    predictiveLoop.start();
+    console.log('[v2] PredictiveLoop started\n');
 
     // 5. Setup realtime triggers and dirty queue
     console.log('[v2] Phase 5: Setting up realtime triggers');
@@ -561,6 +599,7 @@ async function main() {
       verifierLoop.stop();
       aaveListeners.stop();
       liquidationAudit.stop();
+      await pythListener.stop();
       await notifier.notify('🛑 <b>LiquidBot v2 Stopped</b>');
       process.exit(0);
     });
@@ -570,6 +609,7 @@ async function main() {
       verifierLoop.stop();
       aaveListeners.stop();
       liquidationAudit.stop();
+      await pythListener.stop();
       await notifier.notify('🛑 <b>LiquidBot v2 Stopped</b>');
       process.exit(0);
     });

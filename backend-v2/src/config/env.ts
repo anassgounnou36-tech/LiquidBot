@@ -72,6 +72,12 @@ const envSchema = z.object({
   PYTH_STALE_SECS: z.coerce.number().min(10).default(60),
   PYTH_FEED_IDS_JSON: optionalJsonString(z.record(z.string(), z.string())),
 
+  // Predictive liquidation configuration
+  PYTH_MIN_PCT_MOVE_DEFAULT: z.coerce.number().min(0).max(1).default(0.0005),
+  PYTH_MIN_PCT_MOVE_JSON: optionalJsonString(z.record(z.string(), z.number())),
+  PREDICTIVE_PREPARE_HF_THRESHOLD: z.coerce.number().min(1.0).max(1.5).default(1.02),
+  PREDICTIVE_RESCORE_RATE_LIMIT_MS: z.coerce.number().min(1000).max(60000).default(5000),
+
   // Price cache configuration
   PRICE_CACHE_TTL_MS: z.coerce.number().min(1000).max(60000).default(8000),
 

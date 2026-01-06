@@ -1,6 +1,7 @@
 // risk/ActiveRiskSet.ts: Maintain at-risk users from on-chain HF checks
 
 import { config } from '../config/index.js';
+import type { UserIndex } from '../predictive/UserIndex.js';
 
 // Hysteresis: HF must be above this margin to be removed from risk set
 const REMOVAL_HF_MARGIN = 1.10;
@@ -18,6 +19,14 @@ export interface CandidateUser {
  */
 export class ActiveRiskSet {
   private candidates: Map<string, CandidateUser> = new Map();
+  private userIndex: UserIndex | null = null;
+
+  /**
+   * Set the UserIndex for token-based user tracking
+   */
+  setUserIndex(userIndex: UserIndex): void {
+    this.userIndex = userIndex;
+  }
 
   /**
    * Get minimum debt threshold as 1e18-scaled BigInt
@@ -46,6 +55,12 @@ export class ActiveRiskSet {
       lastDebtUsd1e18: debtUsd1e18,
       lastChecked: Date.now()
     });
+    
+    // Update UserIndex with minimal token set (ETH/WETH for now)
+    // TODO: Extract full per-user reserve breakdown when balance data is available
+    if (this.userIndex) {
+      this.updateUserIndexForUser(normalized);
+    }
   }
 
   /**
@@ -82,6 +97,12 @@ export class ActiveRiskSet {
       candidate.lastChecked = Date.now();
     } else {
       this.add(normalized, healthFactor, debtUsd1e18);
+    }
+    
+    // Update UserIndex with minimal token set (ETH/WETH for now)
+    // TODO: Extract full per-user reserve breakdown when balance data is available
+    if (this.userIndex) {
+      this.updateUserIndexForUser(normalized);
     }
   }
 
@@ -156,5 +177,32 @@ export class ActiveRiskSet {
    */
   clear(): void {
     this.candidates.clear();
+  }
+
+  /**
+   * Update UserIndex with minimal token set for a user
+   * TODO: Extract full per-user reserve breakdown when balance data is available
+   * For now, we index all users with ETH/WETH as a baseline
+   */
+  private updateUserIndexForUser(userAddress: string): void {
+    if (!this.userIndex) return;
+    
+    // Minimal implementation: Index all users with ETH/WETH
+    // This ensures at least ETH price movements will trigger rescoring
+    // TODO: When per-user balance data becomes available:
+    // 1. Fetch user's actual collateral and debt tokens
+    // 2. Include anchor tokens (e.g., weETH/wstETH → ETH)
+    // 3. Pass the full token list to userIndex.updateUserTokens()
+    
+    // For Base network, common tokens to consider:
+    // ETH: 0x0000000000000000000000000000000000000000 (native)
+    // WETH: 0x4200000000000000000000000000000000000006
+    // We use lowercase for canonical form
+    const baseTokens = [
+      '0x0000000000000000000000000000000000000000', // ETH
+      '0x4200000000000000000000000000000000000006', // WETH
+    ];
+    
+    this.userIndex.updateUserTokens(userAddress, baseTokens);
   }
 }
