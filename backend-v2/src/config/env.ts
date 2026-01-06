@@ -100,6 +100,7 @@ const envSchema = z.object({
   // Block heartbeat configuration
   LOG_BLOCK_HEARTBEAT: z.string().transform(val => val === 'true').default('false'),
   BLOCK_HEARTBEAT_EVERY_N: z.coerce.number().min(1).default(1),
+  LOG_MINHF_USER: z.string().transform(val => val === 'true').default('false'),
 
   // Live event trace configuration
   LOG_LIVE_EVENTS: z.string().transform(val => val === 'true').default('false'),

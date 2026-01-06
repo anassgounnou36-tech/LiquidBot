@@ -365,24 +365,53 @@ async function main() {
             return;
           }
           
-          // Build candidate plans (up to 3)
+          // Check if we have a prepared plan in cache
+          const preparedPlan = predictiveLoop.getPlanCache().get(user);
           let candidates;
-          try {
-            candidates = await liquidationPlanner.buildCandidatePlans(user);
-          } catch (err) {
-            console.error(
-              `[execute] Failed to build liquidation plans for ${user}:`,
-              err instanceof Error ? err.message : err
-            );
-            attemptHistory.record({
-              user,
-              timestamp: Date.now(),
-              status: 'error',
-              error: err instanceof Error ? err.message : String(err)
-            });
-            return;
+          let usingPreparedPlan = false;
+          let cacheReason = '';
+          
+          if (preparedPlan) {
+            const cacheAgeMs = Date.now() - preparedPlan.createdAt;
+            console.log(`[execute] Found prepared plan for user=${user.substring(0, 10)}... cacheAgeMs=${cacheAgeMs}`);
+            
+            // Convert prepared plan to candidate format
+            candidates = [{
+              debtAsset: preparedPlan.debtAsset,
+              collateralAsset: preparedPlan.collateralAsset,
+              debtToCover: preparedPlan.debtToCover,
+              expectedCollateralOut: preparedPlan.expectedCollateralOut,
+              oracleScore: preparedPlan.score,
+              debtAssetDecimals: 18, // Placeholder - not critical for prepared plans
+              collateralAssetDecimals: 18,
+              liquidationBonusBps: 500
+            }];
+            usingPreparedPlan = true;
+          } else {
+            cacheReason = 'cache_miss';
+            console.log(`[execute] No prepared plan found, building fresh candidates for user=${user.substring(0, 10)}...`);
           }
           
+          // Build candidate plans if not using prepared plan
+          if (!usingPreparedPlan) {
+            try {
+              candidates = await liquidationPlanner.buildCandidatePlans(user);
+            } catch (err) {
+              console.error(
+                `[execute] Failed to build liquidation plans for ${user}:`,
+                err instanceof Error ? err.message : err
+              );
+              attemptHistory.record({
+                user,
+                timestamp: Date.now(),
+                status: 'error',
+                error: err instanceof Error ? err.message : String(err)
+              });
+              return;
+            }
+          }
+          
+          // Check if we have valid candidates
           if (!candidates || candidates.length === 0) {
             console.warn(`[execute] No liquidation plans available for user=${user}`);
             attemptHistory.record({
@@ -391,6 +420,14 @@ async function main() {
               status: 'skip_no_pair'
             });
             return;
+          }
+          
+          // Log execution strategy
+          if (usingPreparedPlan) {
+            const cacheAgeMs = Date.now() - preparedPlan!.createdAt;
+            console.log(`[execute] user=${user.substring(0, 10)}... usingPreparedPlan=true cacheAgeMs=${cacheAgeMs}`);
+          } else {
+            console.log(`[execute] user=${user.substring(0, 10)}... usingPreparedPlan=false reason=${cacheReason}`);
           }
           
           console.log(`[execute] Built ${candidates.length} candidate plans for user=${user}`);
@@ -413,17 +450,31 @@ async function main() {
             return;
           }
           
-          // REAL EXECUTION PATH: Quote-based candidate selection
+          // REAL EXECUTION PATH: Use prepared plan or quote-based candidate selection
           try {
-            // Quote each candidate and compute netDebtToken
-            const quotedCandidates: Array<{
-              candidate: typeof candidates[0];
-              minOut: bigint;
-              netDebtToken: bigint;
-              swapData: string;
-            }> = [];
+            let chosen;
             
-            for (let i = 0; i < candidates.length; i++) {
+            // If using prepared plan, skip quoting and use cached data
+            if (usingPreparedPlan && preparedPlan) {
+              // Use prepared plan's precomputed data directly
+              const netDebtToken = computeNetDebtToken(preparedPlan.minOut, preparedPlan.debtToCover);
+              chosen = {
+                candidate: candidates[0],
+                minOut: preparedPlan.minOut,
+                netDebtToken,
+                swapData: preparedPlan.oneInchCalldata
+              };
+              console.log(`[execute] Using prepared plan (skipping 1inch quote)`);
+            } else {
+              // Quote each candidate and compute netDebtToken
+              const quotedCandidates: Array<{
+                candidate: typeof candidates[0];
+                minOut: bigint;
+                netDebtToken: bigint;
+                swapData: string;
+              }> = [];
+              
+              for (let i = 0; i < candidates.length; i++) {
               const candidate = candidates[i];
               
               try {
@@ -490,7 +541,9 @@ async function main() {
               return 0;
             });
             
-            const chosen = quotedCandidates[0];
+            chosen = quotedCandidates[0];
+            }
+            
             console.log(
               `[execute] ⭐ Chosen candidate: debt=${chosen.candidate.debtAsset.substring(0, 10)}... ` +
               `collateral=${chosen.candidate.collateralAsset.substring(0, 10)}... ` +
@@ -520,6 +573,9 @@ async function main() {
               payout: executorClient.getWalletAddress(),
               expectedCollateralOut: chosen.candidate.expectedCollateralOut
             });
+            
+            // Invalidate plan cache after execution attempt (success or failure)
+            predictiveLoop.getPlanCache().invalidate(user);
             
             if (result.status === 'mined') {
               console.log(`[execute] ✅ Liquidation successful! txHash=${result.txHash}`);
@@ -584,7 +640,7 @@ async function main() {
       wsProvider.on('block', (blockNumber: number) => {
         const everyN = Math.max(1, config.BLOCK_HEARTBEAT_EVERY_N);
         if (blockNumber % everyN !== 0) return;
-        logHeartbeat(blockNumber, riskSet);
+        logHeartbeat(blockNumber, riskSet, predictiveLoop);
       });
       console.log(`[v2] Block heartbeat enabled (every ${config.BLOCK_HEARTBEAT_EVERY_N} block(s))\n`);
     }

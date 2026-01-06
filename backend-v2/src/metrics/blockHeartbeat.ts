@@ -3,6 +3,7 @@
 import { config } from '../config/index.js';
 import { getPriceSourceCounters } from '../prices/priceMath.js';
 import type { ActiveRiskSet } from '../risk/ActiveRiskSet.js';
+import type { PredictiveLoop } from '../predictive/PredictiveLoop.js';
 
 /**
  * Heartbeat metrics interface
@@ -30,12 +31,17 @@ let lastPriceCounters: {
 
 /**
  * Log block heartbeat with system health metrics
- * Includes: risk set sizes, min HF among watched, price source counter deltas
+ * Includes: risk set sizes, actionable min HF among watched, price source counter deltas, predictive stats
  * 
  * @param blockNumber Current block number
  * @param riskSet Active risk set instance
+ * @param predictiveLoop Optional predictive loop for stats
  */
-export function logHeartbeat(blockNumber: number, riskSet: ActiveRiskSet): void {
+export function logHeartbeat(
+  blockNumber: number, 
+  riskSet: ActiveRiskSet,
+  predictiveLoop?: PredictiveLoop
+): void {
   // Check if heartbeat logging is enabled
   if (!config.LOG_BLOCK_HEARTBEAT) {
     return;
@@ -45,21 +51,47 @@ export function logHeartbeat(blockNumber: number, riskSet: ActiveRiskSet): void 
   const allUsers = riskSet.getAll();
   const belowThreshold = riskSet.getBelowThreshold();
   
-  // Find minimum HF among watched (below-threshold) users only
+  // Compute minimum debt threshold
+  const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
+  
+  // Find minimum HF among ACTIONABLE watched users only
+  // Actionable = debtUsd >= MIN_DEBT_USD AND collateral > 0 AND finite HF
   let minHF: number | null = null;
+  let minHFUser: string | null = null;
+  
   for (const user of belowThreshold) {
     const hf = user.healthFactor;
     
-    // Defensive guard against invalid values
-    if (!Number.isFinite(hf)) continue;
+    // Check actionable criteria
+    const isActionable = 
+      user.lastDebtUsd1e18 >= minDebtUsd1e18 &&
+      Number.isFinite(hf) &&
+      hf > 0; // Collateral must be non-zero (HF would be Infinity or 0 otherwise)
+    
+    if (!isActionable) continue;
     
     if (minHF === null || hf < minHF) {
       minHF = hf;
+      minHFUser = user.address;
     }
   }
   
   // Get current price source counters
   const currentCounters = getPriceSourceCounters();
+  
+  // Get predictive stats if available
+  let predictiveStats = null;
+  if (predictiveLoop) {
+    const stats = predictiveLoop.getStats();
+    predictiveStats = {
+      pythTicks: stats.pythTicksSeen,
+      triggers: stats.pythTriggers,
+      affectedUsers: stats.affectedUsersTotal,
+      rescored: stats.rescoredUsers,
+      plansPrepared: stats.plansPrepared,
+      planCacheSize: stats.plansCacheSize
+    };
+  }
   
   // First heartbeat: initialize baseline without showing startup accumulation
   if (lastPriceCounters === null) {
@@ -70,13 +102,25 @@ export function logHeartbeat(blockNumber: number, riskSet: ActiveRiskSet): void 
     };
     
     // Log heartbeat with zeros to establish baseline
-    console.log(
+    let logMsg = 
       `[heartbeat] block=${blockNumber} ` +
       `riskSet=${allUsers.length} ` +
       `belowThreshold=${belowThreshold.length} ` +
       `minHF=${minHF !== null ? minHF.toFixed(4) : 'N/A'} ` +
-      `priceHits(+listener=0,+local=0,+rpc=0)`
-    );
+      `priceHits(+listener=0,+local=0,+rpc=0)`;
+    
+    if (predictiveStats) {
+      logMsg += ` pyth(ticks=${predictiveStats.pythTicks},triggers=${predictiveStats.triggers},` +
+                `affected=${predictiveStats.affectedUsers},rescored=${predictiveStats.rescored},` +
+                `plans=${predictiveStats.plansPrepared},cacheSize=${predictiveStats.planCacheSize})`;
+    }
+    
+    // Optionally log minHF user address
+    if (config.LOG_MINHF_USER && minHFUser) {
+      logMsg += ` minHFUser=${minHFUser.substring(0, 10)}...`;
+    }
+    
+    console.log(logMsg);
     return;
   }
   
@@ -94,12 +138,24 @@ export function logHeartbeat(blockNumber: number, riskSet: ActiveRiskSet): void 
     rpcFallbacks: currentCounters.rpcFallbacks,
   };
   
-  // Log heartbeat with delta counters
-  console.log(
+  // Log heartbeat with delta counters and predictive stats
+  let logMsg = 
     `[heartbeat] block=${blockNumber} ` +
     `riskSet=${allUsers.length} ` +
     `belowThreshold=${belowThreshold.length} ` +
     `minHF=${minHF !== null ? minHF.toFixed(4) : 'N/A'} ` +
-    `priceHits(+listener=${deltaCounters.listenerHits},+local=${deltaCounters.localHits},+rpc=${deltaCounters.rpcFallbacks})`
-  );
+    `priceHits(+listener=${deltaCounters.listenerHits},+local=${deltaCounters.localHits},+rpc=${deltaCounters.rpcFallbacks})`;
+  
+  if (predictiveStats) {
+    logMsg += ` pyth(ticks=${predictiveStats.pythTicks},triggers=${predictiveStats.triggers},` +
+              `affected=${predictiveStats.affectedUsers},rescored=${predictiveStats.rescored},` +
+              `plans=${predictiveStats.plansPrepared},cacheSize=${predictiveStats.planCacheSize})`;
+  }
+  
+  // Optionally log minHF user address
+  if (config.LOG_MINHF_USER && minHFUser) {
+    logMsg += ` minHFUser=${minHFUser.substring(0, 10)}...`;
+  }
+  
+  console.log(logMsg);
 }
