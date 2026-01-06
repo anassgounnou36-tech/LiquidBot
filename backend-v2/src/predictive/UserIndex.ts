@@ -18,29 +18,44 @@ export class UserIndex {
   // tokenKey (lowercase address) -> Set<userAddress (lowercase)>
   private tokenToUsers: Map<string, Set<string>> = new Map();
   
-  // Track statistics for logging
-  private totalUsers: Set<string> = new Set();
+  // userAddress (lowercase) -> Set<token address (lowercase)>
+  private userToTokens: Map<string, Set<string>> = new Map();
 
   /**
-   * Update the tokens associated with a user
+   * Set the tokens associated with a user (replaces previous tokens)
    * 
-   * NOTE: Current implementation is additive - tokens are added but not removed.
-   * This is intentional for the minimal implementation where all users are indexed
-   * with the same fixed set of common tokens. When per-user token extraction is
-   * implemented, this method should be enhanced to replace existing associations
-   * rather than accumulate them.
+   * This method replaces any previous token associations for the user,
+   * ensuring the index accurately reflects current user exposure.
    * 
    * @param userAddress User address (will be normalized to lowercase)
    * @param tokenAddresses Array of token addresses that the user has exposure to
    *                       (includes both collateral and debt tokens, plus anchors)
    */
-  updateUserTokens(userAddress: string, tokenAddresses: string[]): void {
+  setUserTokens(userAddress: string, tokenAddresses: string[]): void {
     const normalizedUser = userAddress.toLowerCase();
-    this.totalUsers.add(normalizedUser);
-
+    
+    // Remove user from previous token associations
+    const previousTokens = this.userToTokens.get(normalizedUser);
+    if (previousTokens) {
+      for (const token of previousTokens) {
+        const users = this.tokenToUsers.get(token);
+        if (users) {
+          users.delete(normalizedUser);
+          // Clean up empty token sets
+          if (users.size === 0) {
+            this.tokenToUsers.delete(token);
+          }
+        }
+      }
+    }
+    
     // Normalize token addresses to lowercase
     const normalizedTokens = tokenAddresses.map(t => t.toLowerCase());
-
+    const tokenSet = new Set(normalizedTokens);
+    
+    // Update user -> tokens mapping
+    this.userToTokens.set(normalizedUser, tokenSet);
+    
     // Add user to each token's set
     for (const tokenAddress of normalizedTokens) {
       if (!this.tokenToUsers.has(tokenAddress)) {
@@ -62,12 +77,45 @@ export class UserIndex {
   }
 
   /**
+   * Remove a user from the index
+   */
+  removeUser(userAddress: string): void {
+    const normalizedUser = userAddress.toLowerCase();
+    
+    // Remove from all token associations
+    const tokens = this.userToTokens.get(normalizedUser);
+    if (tokens) {
+      for (const token of tokens) {
+        const users = this.tokenToUsers.get(token);
+        if (users) {
+          users.delete(normalizedUser);
+          // Clean up empty token sets
+          if (users.size === 0) {
+            this.tokenToUsers.delete(token);
+          }
+        }
+      }
+    }
+    
+    // Remove user mapping
+    this.userToTokens.delete(normalizedUser);
+  }
+
+  /**
    * Get statistics about the index for logging
    */
-  getStats(): { tokenCount: number; userCount: number } {
+  getStats(): { tokenCount: number; userCount: number; avgTokensPerUser: number } {
+    const userCount = this.userToTokens.size;
+    let totalTokens = 0;
+    for (const tokens of this.userToTokens.values()) {
+      totalTokens += tokens.size;
+    }
+    const avgTokensPerUser = userCount > 0 ? totalTokens / userCount : 0;
+    
     return {
       tokenCount: this.tokenToUsers.size,
-      userCount: this.totalUsers.size
+      userCount,
+      avgTokensPerUser: Number(avgTokensPerUser.toFixed(2))
     };
   }
 
@@ -76,7 +124,7 @@ export class UserIndex {
    */
   clear(): void {
     this.tokenToUsers.clear();
-    this.totalUsers.clear();
+    this.userToTokens.clear();
   }
 
   /**

@@ -5,13 +5,13 @@ import type { PythListener, PythPriceUpdate } from '../prices/PythListener.js';
 import type { UserIndex } from './UserIndex.js';
 import type { HealthFactorChecker } from '../risk/HealthFactorChecker.js';
 import type { ActiveRiskSet } from '../risk/ActiveRiskSet.js';
+import type { LiquidationPlanner } from '../execution/liquidationPlanner.js';
+import type { OneInchSwapBuilder } from '../execution/oneInch.js';
+import { PlanCache, type PreparedPlan } from '../execution/PlanCache.js';
 import { config } from '../config/index.js';
 
-/**
- * Symbol to canonical token address mapping for Base network
- * Used to resolve Pyth symbol updates to actual token addresses
- */
-const SYMBOL_TO_ADDRESS_MAP: Record<string, string> = {
+// Default symbol to address mapping for Base (fallback if config not provided)
+const DEFAULT_SYMBOL_TO_ADDRESS: Record<string, string> = {
   'ETH': '0x0000000000000000000000000000000000000000',
   'WETH': '0x4200000000000000000000000000000000000006',
   'USDC': '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',
@@ -21,6 +21,15 @@ const SYMBOL_TO_ADDRESS_MAP: Record<string, string> = {
   'USDbC': '0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca',
 };
 
+// Statistics for heartbeat
+export interface PredictiveStats {
+  pythTicksSeen: number;
+  pythTriggers: number;
+  affectedUsersTotal: number;
+  rescoredUsers: number;
+  plansPrepared: number;
+}
+
 /**
  * PredictiveLoop: Monitor Pyth price updates and trigger predictive rescoring
  * 
@@ -29,14 +38,20 @@ const SYMBOL_TO_ADDRESS_MAP: Record<string, string> = {
  * 2. On each tick, compute % price move vs last cached price
  * 3. If movement exceeds threshold, fetch affected users from UserIndex
  * 4. Rate-limit and rescore those users
- * 5. If projected HF < prepare threshold, prepare execution plan (TODO: Part 2)
- * 6. If on-chain HF ≤ 1, execute immediately (existing verifier loop handles this)
+ * 5. If projected HF < prepare threshold, prepare and cache execution plan
+ * 6. If on-chain HF ≤ 1, execute immediately using cached plan (existing verifier loop handles this)
  */
 export class PredictiveLoop {
   private pythListener: PythListener;
   private userIndex: UserIndex;
   private hfChecker: HealthFactorChecker;
   private riskSet: ActiveRiskSet;
+  private planCache: PlanCache;
+  private planner: LiquidationPlanner | null = null;
+  private oneInch: OneInchSwapBuilder | null = null;
+  
+  // Symbol to address mapping (from config or default)
+  private symbolToAddress: Record<string, string>;
   
   // Track last seen price for each token (lowercase address -> price)
   private lastPrices: Map<string, number> = new Map();
@@ -53,11 +68,21 @@ export class PredictiveLoop {
   // Rate limit in ms
   private rescoreRateLimitMs: number;
   
-  // Prepare HF threshold (for future pre-submit plan caching)
+  // Prepare HF thresholds
   private prepareHfThreshold: number;
+  private urgentHfThreshold: number;
   
   // Track unknown symbols to avoid log spam
   private unknownSymbols: Set<string> = new Set();
+  
+  // Statistics
+  private stats: PredictiveStats = {
+    pythTicksSeen: 0,
+    pythTriggers: 0,
+    affectedUsersTotal: 0,
+    rescoredUsers: 0,
+    plansPrepared: 0
+  };
 
   constructor(
     pythListener: PythListener,
@@ -69,11 +94,16 @@ export class PredictiveLoop {
     this.userIndex = userIndex;
     this.hfChecker = hfChecker;
     this.riskSet = riskSet;
+    this.planCache = new PlanCache();
+    
+    // Load symbol to address mapping from config or use default
+    this.symbolToAddress = config.PYTH_SYMBOL_TO_ADDRESS_JSON || DEFAULT_SYMBOL_TO_ADDRESS;
     
     // Load configuration
     this.defaultThreshold = config.PYTH_MIN_PCT_MOVE_DEFAULT || 0.0005;
-    this.rescoreRateLimitMs = config.PREDICTIVE_RESCORE_RATE_LIMIT_MS || 5000;
-    this.prepareHfThreshold = config.PREDICTIVE_PREPARE_HF_THRESHOLD || 1.02;
+    this.rescoreRateLimitMs = config.PREDICT_MIN_RESCORE_INTERVAL_MS || 500;
+    this.prepareHfThreshold = config.PREDICT_PREPARE_HF || 1.02;
+    this.urgentHfThreshold = config.PREDICT_URGENT_HF || 1.005;
     
     // Load per-token thresholds if configured
     if (config.PYTH_MIN_PCT_MOVE_JSON) {
@@ -87,9 +117,35 @@ export class PredictiveLoop {
     console.log(
       `[predict] PredictiveLoop initialized: ` +
       `defaultThreshold=${this.defaultThreshold} ` +
-      `rescoreRateLimit=${this.rescoreRateLimitMs}ms ` +
-      `prepareHfThreshold=${this.prepareHfThreshold}`
+      `rescoreInterval=${this.rescoreRateLimitMs}ms ` +
+      `prepareHF=${this.prepareHfThreshold} ` +
+      `urgentHF=${this.urgentHfThreshold}`
     );
+  }
+  
+  /**
+   * Set optional planner and oneInch for plan preparation
+   */
+  setExecutionComponents(planner: LiquidationPlanner, oneInch: OneInchSwapBuilder): void {
+    this.planner = planner;
+    this.oneInch = oneInch;
+  }
+  
+  /**
+   * Get plan cache instance
+   */
+  getPlanCache(): PlanCache {
+    return this.planCache;
+  }
+  
+  /**
+   * Get statistics
+   */
+  getStats(): PredictiveStats & ReturnType<PlanCache['getStats']> {
+    return {
+      ...this.stats,
+      ...this.planCache.getStats()
+    };
   }
 
   /**
@@ -107,8 +163,10 @@ export class PredictiveLoop {
    * Handle a Pyth price update
    */
   private async handlePriceUpdate(update: PythPriceUpdate): Promise<void> {
-    // Resolve symbol to token address using canonical mapping
-    const tokenAddress = SYMBOL_TO_ADDRESS_MAP[update.symbol.toUpperCase()];
+    this.stats.pythTicksSeen++;
+    
+    // Resolve symbol to token address using config mapping
+    const tokenAddress = this.symbolToAddress[update.symbol.toUpperCase()];
     
     if (!tokenAddress) {
       // Unknown symbol - log once per symbol to avoid spam
@@ -148,9 +206,11 @@ export class PredictiveLoop {
       return;
     }
     
-    // Log tick
+    this.stats.pythTriggers++;
+    
+    // Log tick with token address
     console.log(
-      `[predict] tick token=${update.symbol} (${tokenKey.substring(0, 10)}...) ` +
+      `[predict] tick token=${update.symbol} addr=${tokenKey.substring(0, 10)}... ` +
       `price=$${update.price.toFixed(2)} ` +
       `lastPrice=$${lastPrice.toFixed(2)} ` +
       `pctMove=${(pctMove * 100).toFixed(3)}% ` +
@@ -165,7 +225,8 @@ export class PredictiveLoop {
       return;
     }
     
-    console.log(`[predict] Found ${affectedUsers.size} affected users for ${update.symbol}`);
+    this.stats.affectedUsersTotal += affectedUsers.size;
+    console.log(`[predict] tick affectedUsers=${affectedUsers.size}`);
     
     // Rate-limit and rescore affected users
     // TODO: Performance optimization - Consider batch rescoring using hfChecker.checkBatch()
@@ -198,11 +259,12 @@ export class PredictiveLoop {
       }
     }
     
+    this.stats.rescoredUsers += rescoredCount;
     console.log(`[predict] Rescored ${rescoredCount}/${affectedUsers.size} users for ${update.symbol}`);
   }
 
   /**
-   * Rescore a single user's health factor
+   * Rescore a single user's health factor and prepare plan if needed
    */
   private async rescoreUser(userAddress: string): Promise<void> {
     // Check current HF from on-chain
@@ -216,20 +278,83 @@ export class PredictiveLoop {
     // Update risk set with fresh HF
     this.riskSet.updateHF(userAddress, result.healthFactor, result.debtUsd1e18);
     
-    // Log if user is approaching liquidation
-    if (result.healthFactor < this.prepareHfThreshold) {
-      const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;
+    const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;
+    
+    // Check if we should prepare a plan
+    if (result.healthFactor < this.prepareHfThreshold && result.healthFactor > 0) {
       console.log(
-        `[predict] ⚠️  User approaching liquidation: ` +
-        `address=${userAddress} ` +
-        `HF=${result.healthFactor.toFixed(4)} ` +
-        `debtUsd=$${debtUsdDisplay.toFixed(2)}`
+        `[prepare] user=${userAddress.substring(0, 10)}... projectedHF=${result.healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)}`
       );
       
-      // TODO: Part 2 - Prepare and cache execution plan here
-      // if (result.healthFactor < this.prepareHfThreshold) {
-      //   await this.prepareExecutionPlan(userAddress);
-      // }
+      // Try to prepare a plan
+      if (this.planner && this.oneInch) {
+        try {
+          await this.preparePlan(userAddress);
+        } catch (err) {
+          console.warn(
+            `[prepare] Failed to prepare plan for ${userAddress.substring(0, 10)}...:`,
+            err instanceof Error ? err.message : err
+          );
+        }
+      }
+    }
+  }
+  
+  /**
+   * Prepare and cache a liquidation plan for a user
+   */
+  private async preparePlan(userAddress: string): Promise<void> {
+    if (!this.planner || !this.oneInch) return;
+    
+    try {
+      // Build candidate plans
+      const candidates = await this.planner.buildCandidatePlans(userAddress);
+      
+      if (!candidates || candidates.length === 0) {
+        return;
+      }
+      
+      // Use first candidate (highest oracle score)
+      const candidate = candidates[0];
+      
+      // Get 1inch quote
+      const swapQuote = await this.oneInch.getSwapCalldata({
+        fromToken: candidate.collateralAsset,
+        toToken: candidate.debtAsset,
+        amount: candidate.expectedCollateralOut.toString(),
+        fromAddress: candidate.collateralAsset, // Placeholder - executor will be set at execution time
+        slippageBps: 100 // 1% slippage
+      });
+      
+      const minOut = BigInt(swapQuote.minOut);
+      
+      // Store prepared plan
+      const plan: PreparedPlan = {
+        user: userAddress,
+        debtAsset: candidate.debtAsset,
+        collateralAsset: candidate.collateralAsset,
+        debtToCover: candidate.debtToCover,
+        expectedCollateralOut: candidate.expectedCollateralOut,
+        minOut,
+        oneInchCalldata: swapQuote.data,
+        score: candidate.oracleScore,
+        createdAt: Date.now()
+      };
+      
+      this.planCache.prepare(plan);
+      this.stats.plansPrepared++;
+      
+      console.log(
+        `[prepare] Plan cached for user=${userAddress.substring(0, 10)}... ` +
+        `debt=${candidate.debtAsset.substring(0, 10)}... ` +
+        `collateral=${candidate.collateralAsset.substring(0, 10)}...`
+      );
+    } catch (err) {
+      // Plan preparation is best-effort - don't fail rescoring
+      console.warn(
+        `[prepare] Plan preparation failed for ${userAddress.substring(0, 10)}...:`,
+        err instanceof Error ? err.message : err
+      );
     }
   }
 }

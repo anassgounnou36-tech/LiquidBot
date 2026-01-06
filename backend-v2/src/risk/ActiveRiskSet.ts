@@ -2,6 +2,8 @@
 
 import { config } from '../config/index.js';
 import type { UserIndex } from '../predictive/UserIndex.js';
+import type { ProtocolDataProvider } from '../aave/protocolDataProvider.js';
+import { extractUserTokens } from '../predictive/tokenExtractor.js';
 
 // Hysteresis: HF must be above this margin to be removed from risk set
 const REMOVAL_HF_MARGIN = 1.10;
@@ -20,12 +22,20 @@ export interface CandidateUser {
 export class ActiveRiskSet {
   private candidates: Map<string, CandidateUser> = new Map();
   private userIndex: UserIndex | null = null;
+  private dataProvider: ProtocolDataProvider | null = null;
 
   /**
    * Set the UserIndex for token-based user tracking
    */
   setUserIndex(userIndex: UserIndex): void {
     this.userIndex = userIndex;
+  }
+  
+  /**
+   * Set the ProtocolDataProvider for fetching user reserves
+   */
+  setDataProvider(dataProvider: ProtocolDataProvider): void {
+    this.dataProvider = dataProvider;
   }
 
   /**
@@ -56,10 +66,11 @@ export class ActiveRiskSet {
       lastChecked: Date.now()
     });
     
-    // Update UserIndex with minimal token set (ETH/WETH for now)
-    // TODO: Extract full per-user reserve breakdown when balance data is available
-    if (this.userIndex) {
-      this.updateUserIndexForUser(normalized);
+    // Update UserIndex with actual user tokens
+    if (this.userIndex && this.dataProvider) {
+      this.updateUserIndexForUser(normalized).catch(err => {
+        console.warn(`[risk] Failed to update UserIndex for ${normalized}:`, err instanceof Error ? err.message : err);
+      });
     }
   }
 
@@ -96,9 +107,11 @@ export class ActiveRiskSet {
       candidate.lastDebtUsd1e18 = debtUsd1e18;
       candidate.lastChecked = Date.now();
       
-      // Update UserIndex (already exists in candidate set)
-      if (this.userIndex) {
-        this.updateUserIndexForUser(normalized);
+      // Update UserIndex with actual user tokens
+      if (this.userIndex && this.dataProvider) {
+        this.updateUserIndexForUser(normalized).catch(err => {
+          console.warn(`[risk] Failed to update UserIndex for ${normalized}:`, err instanceof Error ? err.message : err);
+        });
       }
     } else {
       // User not in set - add them (will call updateUserIndexForUser internally)
@@ -180,31 +193,23 @@ export class ActiveRiskSet {
   }
 
   /**
-   * Update UserIndex with minimal token set for a user
-   * TODO: Extract full per-user reserve breakdown when balance data is available
-   * For now, we index all users with common Base network tokens as a baseline
+   * Update UserIndex with actual per-user token exposure
    */
-  private updateUserIndexForUser(userAddress: string): void {
-    if (!this.userIndex) return;
+  private async updateUserIndexForUser(userAddress: string): Promise<void> {
+    if (!this.userIndex || !this.dataProvider) return;
     
-    // Minimal implementation: Index all users with common Base tokens
-    // This ensures price movements in major tokens will trigger rescoring
-    // TODO: When per-user balance data becomes available:
-    // 1. Fetch user's actual collateral and debt tokens
-    // 2. Include anchor tokens (e.g., weETH/wstETH → ETH)
-    // 3. Pass the full token list to userIndex.updateUserTokens()
-    
-    // Common tokens on Base network (lowercase canonical addresses)
-    const baseTokens = [
-      '0x0000000000000000000000000000000000000000', // ETH (native)
-      '0x4200000000000000000000000000000000000006', // WETH
-      '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', // USDC
-      '0x0555e30da8f98308edb960aa94c0db47230d2b9c', // WBTC
-      '0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22', // cbETH
-      '0x50c5725949a6f0c72e6c4a641f24049a917db0cb', // DAI
-      '0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca', // USDbC
-    ];
-    
-    this.userIndex.updateUserTokens(userAddress, baseTokens);
+    try {
+      // Fetch user's actual reserves from Aave
+      const reserves = await this.dataProvider.getAllUserReserves(userAddress);
+      
+      // Extract token addresses where user has exposure
+      const tokenAddresses = extractUserTokens(reserves);
+      
+      // Update index (replaces previous tokens)
+      this.userIndex.setUserTokens(userAddress, tokenAddresses);
+    } catch (err) {
+      // If extraction fails, don't index this user (safer than guessing)
+      console.warn(`[risk] Token extraction failed for ${userAddress}, not indexing:`, err instanceof Error ? err.message : err);
+    }
   }
 }
