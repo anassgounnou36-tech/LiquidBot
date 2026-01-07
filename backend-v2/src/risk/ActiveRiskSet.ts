@@ -15,6 +15,7 @@ export interface CandidateUser {
   totalCollateralBase: bigint;
   lastChecked: number;
   lastIndexRefresh?: number; // Timestamp of last UserIndex refresh for this user
+  lastCollateralBase?: bigint; // Optional: for future actionable filters and heartbeat
 }
 
 /**
@@ -66,7 +67,8 @@ export class ActiveRiskSet {
       healthFactor,
       lastDebtUsd1e18: debtUsd1e18,
       totalCollateralBase,
-      lastChecked: Date.now()
+      lastChecked: Date.now(),
+      lastCollateralBase: totalCollateralBase
     });
     
     // Update UserIndex with actual user tokens (with throttling)
@@ -74,6 +76,37 @@ export class ActiveRiskSet {
       this.updateUserIndexForUser(normalized).catch(err => {
         console.warn(`[risk] Failed to update UserIndex for ${normalized}:`, err instanceof Error ? err.message : err);
       });
+    }
+  }
+
+  /**
+   * Add or update a user in the risk set with memory cap enforcement
+   * If size exceeds RISKSET_MAX_USERS, removes the user with the highest HF (least risky)
+   * @param address User address
+   * @param healthFactor User's health factor
+   * @param debtUsd1e18 User's debt in USD (1e18 scaled)
+   * @param totalCollateralBase User's total collateral base
+   */
+  addWithCap(address: string, healthFactor: number, debtUsd1e18: bigint = 0n, totalCollateralBase: bigint = 0n): void {
+    // First add the user normally
+    this.add(address, healthFactor, debtUsd1e18, totalCollateralBase);
+    
+    // Check if we need to trim due to cap
+    if (this.candidates.size > config.RISKSET_MAX_USERS) {
+      // Find user with highest HF (least risky) and remove them
+      let maxHF = -Infinity;
+      let maxHFAddress: string | null = null;
+      
+      for (const [addr, candidate] of this.candidates.entries()) {
+        if (candidate.healthFactor > maxHF && Number.isFinite(candidate.healthFactor)) {
+          maxHF = candidate.healthFactor;
+          maxHFAddress = addr;
+        }
+      }
+      
+      if (maxHFAddress !== null) {
+        this.candidates.delete(maxHFAddress);
+      }
     }
   }
 

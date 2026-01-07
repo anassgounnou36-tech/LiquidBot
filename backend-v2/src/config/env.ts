@@ -111,6 +111,9 @@ const envSchema = z.object({
 
   // Dust liquidatable logging (HF < 1.0 but debt < MIN_DEBT_USD)
   LOG_DUST_LIQUIDATABLE: z.string().transform(val => val === 'true').default('false'),
+
+  // Risk set memory cap (Phase 4 streaming)
+  RISKSET_MAX_USERS: z.coerce.number().min(500).default(5000),
 });
 
 export type Env = z.infer<typeof envSchema>;

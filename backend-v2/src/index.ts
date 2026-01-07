@@ -49,7 +49,7 @@ async function main() {
     console.log(`[v2] Universe seeding cap: ${config.UNIVERSE_MAX_CANDIDATES || DEFAULT_UNIVERSE_MAX_CANDIDATES} (source: ${config.UNIVERSE_MAX_CANDIDATES ? 'UNIVERSE_MAX_CANDIDATES' : 'default'})`);
     console.log(`[v2] DirtyQueue cap: unbounded (Set-based)`);
     console.log(`[v2] VerifierLoop batch size: 200`);
-    console.log(`[v2] ActiveRiskSet cap: unbounded (Map-based)`);
+    console.log(`[v2] ActiveRiskSet cap: ${config.RISKSET_MAX_USERS} users (streaming Phase 4)`);
     console.log(`[v2] MIN_DEBT_USD filter: $${config.MIN_DEBT_USD}`);
     console.log(`[v2] Price cache TTL: ${config.PRICE_CACHE_TTL_MS}ms`);
     console.log('[v2] ============================================\n');
@@ -211,42 +211,66 @@ async function main() {
     riskSet.setDataProvider(dataProvider);
     console.log('[v2] UserIndex initialized and wired to ActiveRiskSet');
     
-    riskSet.addBulk(users);
+    // DO NOT add all users to riskSet upfront
+    // Instead, stream HF checks and add only actionable users
     
     const hfChecker = new HealthFactorChecker();
-    console.log('[v2] Checking health factors for all users (this may take a while)...');
+    console.log('[v2] Checking health factors for all users (streaming mode)...');
     
-    const results = await hfChecker.checkBatch(users, 100);
-    console.log(`[v2] Checked ${results.length} users`);
-    
-    // Compute minimum debt threshold once (same as ActiveRiskSet uses)
+    // Compute minimum debt threshold once
     const minDebtUsd1e18 = BigInt(Math.floor(config.MIN_DEBT_USD)) * (10n ** 18n);
     
-    // Update risk set with fresh HFs
-    let dustLiquidatableCount = 0;
+    // Initialize streaming counters
+    const scanned = {
+      total: 0,
+      kept: 0,
+      skippedDebt: 0,
+      skippedHF: 0,
+      skippedNoColl: 0
+    };
     
-    for (const result of results) {
-      riskSet.updateHF(result.address, result.healthFactor, result.debtUsd1e18, result.totalCollateralBase);
-      
-      // Log watched/actionable users (HF < threshold AND debt >= MIN_DEBT_USD)
-      if (result.healthFactor < config.HF_THRESHOLD_START && result.debtUsd1e18 >= minDebtUsd1e18) {
-        const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;
+    // Stream Phase 4 HF scan with immediate filtering
+    await hfChecker.checkBatchStream(users, 100, (batchResults) => {
+      for (const r of batchResults) {
+        scanned.total++;
+        
+        // Filter 1: Skip if no collateral
+        if (r.totalCollateralBase <= 0n) {
+          scanned.skippedNoColl++;
+          continue;
+        }
+        
+        // Filter 2: Skip if debt below minimum
+        if (r.debtUsd1e18 < minDebtUsd1e18) {
+          scanned.skippedDebt++;
+          continue;
+        }
+        
+        // Filter 3: Skip if HF is above threshold (not at risk)
+        if (r.healthFactor > config.HF_THRESHOLD_START) {
+          scanned.skippedHF++;
+          continue;
+        }
+        
+        // Keep: Add to risk set with cap enforcement
+        riskSet.addWithCap(r.address, r.healthFactor, r.debtUsd1e18, r.totalCollateralBase);
+        scanned.kept++;
+        
+        // Log watched/actionable users
+        const debtUsdDisplay = Number(r.debtUsd1e18) / 1e18;
         console.log(
-          `[v2] Watched user: ${result.address} HF=${result.healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)}`
+          `[v2] Watched user: ${r.address} HF=${r.healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)}`
         );
       }
-      
-      // Optional: Log dust liquidatable users (HF < 1.0 but debt < MIN_DEBT_USD)
-      if (config.LOG_DUST_LIQUIDATABLE && result.healthFactor < 1.0 && result.debtUsd1e18 < minDebtUsd1e18) {
-        dustLiquidatableCount++;
-        const debtUsdDisplay = Number(result.debtUsd1e18) / 1e18;
-        console.log(
-          `[v2][dust-liq] user=${result.address} HF=${result.healthFactor.toFixed(4)} debtUsd=$${debtUsdDisplay.toFixed(2)} (excluded by MIN_DEBT_USD=${config.MIN_DEBT_USD})`
-        );
-      }
-    }
+    });
     
-    // Derive final counts from actual risk set (not manual counters)
+    // Print final streaming summary
+    console.log(
+      `[v2] Phase 4 done: scanned=${scanned.total} kept=${scanned.kept} ` +
+      `skippedDebt=${scanned.skippedDebt} skippedHF=${scanned.skippedHF} skippedNoColl=${scanned.skippedNoColl}`
+    );
+    
+    // Derive final counts from actual risk set
     const actualWatched = riskSet.getBelowThreshold();
     const totalStored = riskSet.size();
     
@@ -261,8 +285,7 @@ async function main() {
     }
     
     console.log(
-      `[v2] Active risk set built: scanned=${results.length} stored=${totalStored} watched=${actualWatched.length} (minDebt>=$${config.MIN_DEBT_USD})` +
-      (config.LOG_DUST_LIQUIDATABLE ? ` dustLiquidatable=${dustLiquidatableCount}` : ' (dust log disabled)') +
+      `[v2] Active risk set built: scanned=${scanned.total} stored=${totalStored} watched=${actualWatched.length} (minDebt>=$${config.MIN_DEBT_USD})` +
       (minHF !== null ? ` minHF=${minHF.toFixed(4)}` : '')
     );
     
