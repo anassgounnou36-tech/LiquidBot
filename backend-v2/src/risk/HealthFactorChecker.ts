@@ -56,6 +56,25 @@ export class HealthFactorChecker {
   }
 
   /**
+   * Stream health factor checks in batches with immediate callback processing
+   * Avoids accumulating large result arrays in memory
+   * @param addresses User addresses to check
+   * @param batchSize Number of users per batch (default 100)
+   * @param onBatch Callback invoked for each batch of results
+   */
+  async checkBatchStream(
+    addresses: string[], 
+    batchSize: number = 100, 
+    onBatch: (batchResults: HealthFactorResult[]) => Promise<void> | void
+  ): Promise<void> {
+    for (let i = 0; i < addresses.length; i += batchSize) {
+      const batch = addresses.slice(i, i + batchSize);
+      const batchResults = await this.checkSingleBatch(batch);
+      await onBatch(batchResults);
+    }
+  }
+
+  /**
    * Check a single batch of users
    */
   private async checkSingleBatch(addresses: string[]): Promise<HealthFactorResult[]> {
