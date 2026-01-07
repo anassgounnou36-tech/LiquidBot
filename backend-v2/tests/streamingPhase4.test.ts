@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
 
+// Test constants matching production defaults
+const MIN_DEBT_USD = 50;
+const MIN_DEBT_USD_1E18 = BigInt(MIN_DEBT_USD) * (10n ** 18n);
+const HF_THRESHOLD_START = 1.05;
+
 describe('Streaming Phase 4 HF Scan', () => {
   describe('Counter tracking logic', () => {
     it('should correctly count skipped and kept users', () => {
@@ -11,9 +16,6 @@ describe('Streaming Phase 4 HF Scan', () => {
         skippedHF: 0,
         skippedNoColl: 0
       };
-      
-      const minDebtUsd1e18 = BigInt(50) * (10n ** 18n); // $50 minimum
-      const HF_THRESHOLD_START = 1.05;
       
       // Simulated batch results
       const mockResults = [
@@ -38,7 +40,7 @@ describe('Streaming Phase 4 HF Scan', () => {
           continue;
         }
         
-        if (r.debtUsd1e18 < minDebtUsd1e18) {
+        if (r.debtUsd1e18 < MIN_DEBT_USD_1E18) {
           scanned.skippedDebt++;
           continue;
         }
@@ -68,9 +70,6 @@ describe('Streaming Phase 4 HF Scan', () => {
         skippedNoColl: 0
       };
       
-      const minDebtUsd1e18 = BigInt(50) * (10n ** 18n);
-      const HF_THRESHOLD_START = 1.05;
-      
       const mockResults = [
         { address: '0x1', totalCollateralBase: 0n, debtUsd1e18: 100n * (10n ** 18n), healthFactor: 0.95 },
         { address: '0x2', totalCollateralBase: 1000n, debtUsd1e18: 10n * (10n ** 18n), healthFactor: 1.2 },
@@ -85,7 +84,7 @@ describe('Streaming Phase 4 HF Scan', () => {
           continue;
         }
         
-        if (r.debtUsd1e18 < minDebtUsd1e18) {
+        if (r.debtUsd1e18 < MIN_DEBT_USD_1E18) {
           scanned.skippedDebt++;
           continue;
         }
@@ -112,9 +111,6 @@ describe('Streaming Phase 4 HF Scan', () => {
         skippedNoColl: 0
       };
       
-      const minDebtUsd1e18 = BigInt(50) * (10n ** 18n);
-      const HF_THRESHOLD_START = 1.05;
-      
       const mockResults = [
         { address: '0x1', totalCollateralBase: 1000n, debtUsd1e18: 100n * (10n ** 18n), healthFactor: 1.02 },
         { address: '0x2', totalCollateralBase: 1000n, debtUsd1e18: 200n * (10n ** 18n), healthFactor: 0.99 },
@@ -129,7 +125,7 @@ describe('Streaming Phase 4 HF Scan', () => {
           continue;
         }
         
-        if (r.debtUsd1e18 < minDebtUsd1e18) {
+        if (r.debtUsd1e18 < MIN_DEBT_USD_1E18) {
           scanned.skippedDebt++;
           continue;
         }

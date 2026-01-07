@@ -64,7 +64,7 @@ export class HealthFactorChecker {
    */
   async checkBatchStream(
     addresses: string[], 
-    batchSize: number, 
+    batchSize: number = 100, 
     onBatch: (batchResults: HealthFactorResult[]) => Promise<void> | void
   ): Promise<void> {
     for (let i = 0; i < addresses.length; i += batchSize) {

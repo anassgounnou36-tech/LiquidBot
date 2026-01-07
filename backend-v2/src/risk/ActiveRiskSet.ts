@@ -15,7 +15,7 @@ export interface CandidateUser {
   totalCollateralBase: bigint;
   lastChecked: number;
   lastIndexRefresh?: number; // Timestamp of last UserIndex refresh for this user
-  lastCollateralBase?: bigint; // Optional: for future actionable filters and heartbeat
+  lastCollateralBase?: bigint; // Latest collateral snapshot for future delta-based filtering and heartbeat monitoring
 }
 
 /**
