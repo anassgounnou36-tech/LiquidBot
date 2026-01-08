@@ -117,6 +117,8 @@ export const rawEnvSchema = z.object({
   PRICE_TRIGGER_JITTER_MIN_MS: z.string().optional(),
   PRICE_TRIGGER_JITTER_MAX_MS: z.string().optional(),
   PRICE_TRIGGER_NEAR_BAND_LOWER_BOUND: z.string().optional(),
+  PRICE_TRIGGER_MIN_INTERVAL_SEC: z.string().optional(),
+  PRICE_TRIGGER_GLOBAL_RATE_LIMIT: z.string().optional(),
   
   // Auto-discovery of Chainlink feeds and debt tokens
   AUTO_DISCOVER_FEEDS: z.string().optional(),
@@ -131,6 +133,8 @@ export const rawEnvSchema = z.object({
   // Global RPC rate limiting
   GLOBAL_RPC_RATE_LIMIT: z.string().optional(),
   GLOBAL_RPC_BURST_CAPACITY: z.string().optional(),
+  ETH_CALL_TRANSPORT: z.string().optional(),
+  ETH_CALL_MAX_IN_FLIGHT: z.string().optional(),
   
   // Pending-state verification
   PENDING_VERIFY_ENABLED: z.string().optional(),
@@ -728,7 +732,18 @@ export const env = (() => {
     priceTriggerAssets: parsed.PRICE_TRIGGER_ASSETS || 'WETH',
     priceTriggerDebounceSec: Number(parsed.PRICE_TRIGGER_DEBOUNCE_SEC || 60),
     priceTriggerCumulative: (parsed.PRICE_TRIGGER_CUMULATIVE || 'false').toLowerCase() === 'true',
-    priceTriggerPollSec: Number(parsed.PRICE_TRIGGER_POLL_SEC || 15),
+    priceTriggerPollSec: (() => {
+      const rawValue = Number(parsed.PRICE_TRIGGER_POLL_SEC || 15);
+      if (rawValue === 0) {
+        // 0 means "disable polling fallback"
+        return 0;
+      }
+      if (rawValue > 0 && rawValue < 5) {
+        // Values <5 are clamped to 5 with warning (logged in RealTimeHFService)
+        return 5;
+      }
+      return rawValue;
+    })(),
     
     // Per-asset price trigger configuration
     priceTriggerBpsByAsset: parsed.PRICE_TRIGGER_BPS_BY_ASSET ?? 'WETH:12',
@@ -748,6 +763,8 @@ export const env = (() => {
     priceTriggerJitterMinMs: Number(parsed.PRICE_TRIGGER_JITTER_MIN_MS || 40),
     priceTriggerJitterMaxMs: Number(parsed.PRICE_TRIGGER_JITTER_MAX_MS || 60),
     priceTriggerNearBandLowerBound: Number(parsed.PRICE_TRIGGER_NEAR_BAND_LOWER_BOUND || 0.5),
+    priceTriggerMinIntervalSec: Number(parsed.PRICE_TRIGGER_MIN_INTERVAL_SEC || 10),
+    priceTriggerGlobalRateLimit: (parsed.PRICE_TRIGGER_GLOBAL_RATE_LIMIT || 'on').toLowerCase() === 'on',
     
     // Auto-discovery of Chainlink feeds and debt tokens
     autoDiscoverFeeds: (parsed.AUTO_DISCOVER_FEEDS || 'true').toLowerCase() === 'true',
@@ -762,6 +779,8 @@ export const env = (() => {
     // Global RPC rate limiting
     globalRpcRateLimit: Number(parsed.GLOBAL_RPC_RATE_LIMIT || 50), // 50 calls/sec
     globalRpcBurstCapacity: Number(parsed.GLOBAL_RPC_BURST_CAPACITY || 100), // 100 tokens
+    ethCallTransport: (parsed.ETH_CALL_TRANSPORT || 'HTTP').toUpperCase() as 'HTTP' | 'WS',
+    ethCallMaxInFlight: Number(parsed.ETH_CALL_MAX_IN_FLIGHT || 120),
     
     // Pending-state verification
     pendingVerifyEnabled: (parsed.PENDING_VERIFY_ENABLED || 'true').toLowerCase() === 'true',

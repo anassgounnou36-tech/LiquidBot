@@ -137,7 +137,9 @@ interface PreSimQueueEntry {
 
 export class RealTimeHFService extends EventEmitter {
   private provider: WebSocketProvider | JsonRpcProvider | null = null;
+  private httpProvider: JsonRpcProvider | null = null; // HTTP provider for eth_call
   private multicall3: Contract | null = null;
+  private multicall3Http: Contract | null = null; // Multicall3 instance for HTTP provider
   private aavePool: Contract | null = null;
   private candidateManager: CandidateManager;
   private subgraphService?: SubgraphService;
@@ -270,6 +272,7 @@ export class RealTimeHFService extends EventEmitter {
     lastAnswer: bigint | null;
     lastUpdatedAt: number | null;
     lastTriggerTs: number;
+    lastScanTs: number; // Track last actual scan time for min interval enforcement
     baselineAnswer: bigint | null;
   }> = new Map();
   
@@ -684,6 +687,26 @@ export class RealTimeHFService extends EventEmitter {
       console.error('[realtime-hf] Failed to setup provider:', err);
       throw err;
     }
+    
+    // Setup HTTP provider for eth_call operations based on ETH_CALL_TRANSPORT config
+    const transport = config.ethCallTransport;
+    if (transport === 'HTTP') {
+      // Route eth_call through HTTP provider
+      const httpUrl = config.rpcUrl || wsUrl.replace('wss://', 'https://').replace('ws://', 'http://');
+      if (!httpUrl) {
+        throw new Error('[realtime-hf] No RPC_URL configured for HTTP eth_call transport');
+      }
+      
+      this.httpProvider = new JsonRpcProvider(httpUrl);
+      await this.httpProvider.ready;
+      // eslint-disable-next-line no-console
+      console.log(`[provider] ws_ready; using HTTP for eth_call operations; WS reserved for subscriptions (url=${httpUrl.substring(0, 50)}...)`);
+    } else {
+      // Use WebSocket for eth_call (legacy behavior)
+      this.httpProvider = null;
+      // eslint-disable-next-line no-console
+      console.log('[provider] ws_ready; using WebSocket for eth_call operations');
+    }
   }
 
   /**
@@ -696,6 +719,13 @@ export class RealTimeHFService extends EventEmitter {
 
     this.multicall3 = new Contract(config.multicall3Address, MULTICALL3_ABI, this.provider);
     this.aavePool = new Contract(config.aavePool, AAVE_POOL_ABI, this.provider);
+    
+    // Setup HTTP multicall3 contract if HTTP transport is enabled
+    if (this.httpProvider) {
+      this.multicall3Http = new Contract(config.multicall3Address, MULTICALL3_ABI, this.httpProvider);
+      // eslint-disable-next-line no-console
+      console.log('[realtime-hf] Multicall3 HTTP instance created for eth_call operations');
+    }
     
     // Initialize MicroVerifier for fast-path verification
     if (config.microVerifyEnabled) {
@@ -864,6 +894,7 @@ export class RealTimeHFService extends EventEmitter {
             lastAnswer: null,
             lastUpdatedAt: null,
             lastTriggerTs: 0,
+            lastScanTs: 0,
             baselineAnswer: null
           });
           
@@ -1648,6 +1679,7 @@ export class RealTimeHFService extends EventEmitter {
           lastAnswer: null,
           lastUpdatedAt: null,
           lastTriggerTs: 0,
+          lastScanTs: 0,
           baselineAnswer: null
         };
         this.priceAssetState.set(feedAddress, state);
@@ -1833,6 +1865,30 @@ export class RealTimeHFService extends EventEmitter {
         return;
       }
       
+      // Goal: PRICE_TRIGGER_MIN_INTERVAL_SEC enforcement
+      // Check if enough time has passed since last scan for this asset
+      const feedAddressForInterval = this.discoveredReserves.find(
+        r => r.symbol.toUpperCase() === symbol.toUpperCase()
+      )?.chainlinkAggregator;
+      
+      if (feedAddressForInterval) {
+        const state = this.priceAssetState.get(feedAddressForInterval);
+        if (state && state.lastScanTs > 0) {
+          const now = Date.now();
+          const elapsedSec = (now - state.lastScanTs) / 1000;
+          const minInterval = config.priceTriggerMinIntervalSec;
+          
+          if (elapsedSec < minInterval) {
+            // eslint-disable-next-line no-console
+            console.log(
+              `[price-trigger] scan suppressed: symbol=${symbol} block=${blockNumber} ` +
+              `reason=min_interval elapsed=${elapsedSec.toFixed(1)}s min=${minInterval}s`
+            );
+            return;
+          }
+        }
+      }
+      
       // Mark as in-flight
       this.inFlightPriceTriggerBySymbol.set(symbol, true);
       
@@ -1913,6 +1969,18 @@ export class RealTimeHFService extends EventEmitter {
               const latencyMs = Date.now() - startReserveEvent;
               reserveEventToMicroVerifyMs.observe({ reserve: reserve.asset.substring(0, 10) }, latencyMs);
               
+              // Update lastScanTs for min interval enforcement (when targeted scan executes)
+              const feedAddressForUpdate1 = this.discoveredReserves.find(
+                r => r.symbol.toUpperCase() === symbol.toUpperCase()
+              )?.chainlinkAggregator;
+              
+              if (feedAddressForUpdate1) {
+                const state = this.priceAssetState.get(feedAddressForUpdate1);
+                if (state) {
+                  state.lastScanTs = Date.now();
+                }
+              }
+              
               // eslint-disable-next-line no-console
               console.log(
                 `[price-trigger-targeted] mini-multicall complete latency=${latencyMs}ms subset=${targetedSubset.length}`
@@ -1940,6 +2008,18 @@ export class RealTimeHFService extends EventEmitter {
           `candidates=${capped.length} latency=${latencyMs}ms trigger=price`
         );
       }
+      
+      // Update lastScanTs for min interval enforcement
+      const feedAddressForUpdate2 = this.discoveredReserves.find(
+        r => r.symbol.toUpperCase() === symbol.toUpperCase()
+      )?.chainlinkAggregator;
+      
+      if (feedAddressForUpdate2) {
+        const state = this.priceAssetState.get(feedAddressForUpdate2);
+        if (state) {
+          state.lastScanTs = Date.now();
+        }
+      }
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[price-trigger] Error handling price trigger:', err);
@@ -1954,7 +2034,25 @@ export class RealTimeHFService extends EventEmitter {
    * Runs even when events are active but respects debounce window
    */
   private startPricePolling(feeds: Record<string, string>): void {
-    const pollIntervalMs = config.priceTriggerPollSec * 1000;
+    // Check for misconfiguration and apply guardrails
+    const rawPollSec = config.priceTriggerPollSec;
+    if (rawPollSec === 0) {
+      // eslint-disable-next-line no-console
+      console.log('[price-trigger] PRICE_TRIGGER_POLL_SEC=0: polling disabled (event-only mode)');
+      return;
+    }
+    
+    // Warn if value was clamped
+    const rawEnvValue = process.env.PRICE_TRIGGER_POLL_SEC;
+    if (rawEnvValue && Number(rawEnvValue) > 0 && Number(rawEnvValue) < 5) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[price-trigger] PRICE_TRIGGER_POLL_SEC=${rawEnvValue} is too low, clamped to 5s minimum ` +
+        `(prevents tight loops and RPC saturation)`
+      );
+    }
+    
+    const pollIntervalMs = rawPollSec * 1000;
     
     // Filter out derived assets - they should not be polled at asset level
     const pollableFeeds: Record<string, string> = {};
@@ -3018,17 +3116,40 @@ export class RealTimeHFService extends EventEmitter {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const startTime = Date.now();
+      
+      // Acquire in-flight slot if global rate limiting is enabled for price triggers
+      const shouldLimitInFlight = config.priceTriggerGlobalRateLimit;
+      let inFlightAcquired = false;
+      
+      if (shouldLimitInFlight) {
+        inFlightAcquired = await this.globalRpcRateLimiter.acquireInFlight(5000);
+        if (!inFlightAcquired) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `${logPrefix} Chunk ${chunkNum} failed to acquire in-flight slot (max=${config.ethCallMaxInFlight})`
+          );
+          // Skip this chunk and continue with next attempt
+          if (attempt < maxAttempts - 1) {
+            await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 1000));
+            continue;
+          }
+          return null;
+        }
+      }
 
       try {
         let results: Array<{ success: boolean; returnData: string }>;
         let usedProvider: 'primary' | 'secondary' = 'primary';
 
+        // Use HTTP multicall3 if available, otherwise fall back to WS multicall3
+        const multicallToUse = this.multicall3Http || this.multicall3;
+        
         // Implement hedging if configured and secondary provider available
         if (config.headCheckHedgeMs > 0 && this.secondaryMulticall3 && config.secondaryHeadRpcUrl) {
           // Race primary against hedged secondary
           const hedgeDelayMs = config.headCheckHedgeMs;
           
-          const primaryPromise = this.multicall3!.aggregate3.staticCall(chunk, overrides);
+          const primaryPromise = multicallToUse!.aggregate3.staticCall(chunk, overrides);
           
           // Create hedge promise that only fires after delay
           const hedgePromise = new Promise<{ result: Array<{ success: boolean; returnData: string }>; provider: 'secondary' }>((resolve, reject) => {
@@ -3063,7 +3184,7 @@ export class RealTimeHFService extends EventEmitter {
         } else {
           // No hedging, use primary only with timeout
           results = await this.withTimeout(
-            this.multicall3!.aggregate3.staticCall(chunk, overrides),
+            multicallToUse!.aggregate3.staticCall(chunk, overrides),
             config.chunkTimeoutMs,
             `Chunk ${chunkNum} timeout after ${config.chunkTimeoutMs}ms`
           );
@@ -3079,10 +3200,22 @@ export class RealTimeHFService extends EventEmitter {
         this.lastProgressAt = Date.now();
 
         this.clearRateLimitTracking();
+        
+        // Release in-flight slot on success
+        if (shouldLimitInFlight && inFlightAcquired) {
+          this.globalRpcRateLimiter.releaseInFlight();
+        }
+        
         // eslint-disable-next-line no-console
         console.log(`${logPrefix} Chunk ${chunkNum}/${totalChunks} complete (${chunk.length} calls, ${durationSec.toFixed(2)}s, provider=${usedProvider})`);
         return results;
       } catch (err) {
+        // Release in-flight slot on error
+        if (shouldLimitInFlight && inFlightAcquired) {
+          this.globalRpcRateLimiter.releaseInFlight();
+          inFlightAcquired = false; // Mark as released
+        }
+        
         const isTimeout = err instanceof Error && err.message.includes('timeout');
 
         if (isTimeout) {
@@ -3121,6 +3254,13 @@ export class RealTimeHFService extends EventEmitter {
             this.lastProgressAt = Date.now();
 
             this.clearRateLimitTracking();
+            
+            // Release in-flight slot on success (secondary fallback path)
+            if (shouldLimitInFlight && inFlightAcquired) {
+              this.globalRpcRateLimiter.releaseInFlight();
+              inFlightAcquired = false; // Mark as released
+            }
+            
             // eslint-disable-next-line no-console
             console.log(`${logPrefix} Chunk ${chunkNum}/${totalChunks} complete via secondary (${chunk.length} calls, ${secondaryDurationSec.toFixed(2)}s)`);
             return results;
@@ -3152,6 +3292,11 @@ export class RealTimeHFService extends EventEmitter {
           // eslint-disable-next-line no-console
           console.error(`${logPrefix} Chunk ${chunkNum} failed:`, err);
         }
+        
+        // Release in-flight slot if still held
+        if (shouldLimitInFlight && inFlightAcquired) {
+          this.globalRpcRateLimiter.releaseInFlight();
+        }
 
         return null;
       }
@@ -3172,7 +3317,8 @@ export class RealTimeHFService extends EventEmitter {
     chunkSize?: number,
     blockTag?: number | 'pending'
   ): Promise<Array<{ success: boolean; returnData: string }>> {
-    if (!this.multicall3 || !this.provider) {
+    const multicallToCheck = this.multicall3Http || this.multicall3;
+    if (!multicallToCheck || !this.provider) {
       throw new Error('[realtime-hf] Multicall3 or provider not initialized');
     }
 

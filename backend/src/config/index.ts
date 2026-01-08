@@ -161,6 +161,8 @@ export const config = {
   get priceTriggerJitterMinMs() { return env.priceTriggerJitterMinMs; },
   get priceTriggerJitterMaxMs() { return env.priceTriggerJitterMaxMs; },
   get priceTriggerNearBandLowerBound() { return env.priceTriggerNearBandLowerBound; },
+  get priceTriggerMinIntervalSec() { return env.priceTriggerMinIntervalSec; },
+  get priceTriggerGlobalRateLimit() { return env.priceTriggerGlobalRateLimit; },
   
   // Auto-discovery of Chainlink feeds and debt tokens
   get autoDiscoverFeeds() { return env.autoDiscoverFeeds; },
@@ -174,6 +176,8 @@ export const config = {
   // Global RPC rate limiting
   get globalRpcRateLimit() { return env.globalRpcRateLimit; },
   get globalRpcBurstCapacity() { return env.globalRpcBurstCapacity; },
+  get ethCallTransport() { return env.ethCallTransport; },
+  get ethCallMaxInFlight() { return env.ethCallMaxInFlight; },
   
   // Pending-state verification
   get pendingVerifyEnabled() { return env.pendingVerifyEnabled; },

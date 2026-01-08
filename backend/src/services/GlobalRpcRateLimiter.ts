@@ -29,6 +29,7 @@ export interface AcquireOptions {
 
 /**
  * GlobalRpcRateLimiter enforces a global rate limit on RPC calls
+ * Also enforces max in-flight eth_call limit via semaphore
  */
 export class GlobalRpcRateLimiter {
   private tokens: number;
@@ -37,9 +38,15 @@ export class GlobalRpcRateLimiter {
   private readonly refillIntervalMs: number;
   private readonly tokensPerRefill: number;
   
+  // Semaphore for max in-flight eth_call limit
+  private inFlightCalls = 0;
+  private readonly maxInFlight: number;
+  private inFlightWaitQueue: Array<() => void> = [];
+  
   private lastRefillTime: number;
   private totalWaits = 0;
   private totalDrops = 0;
+  private totalInFlightWaits = 0;
   
   private refillTimer?: NodeJS.Timeout;
   
@@ -47,6 +54,7 @@ export class GlobalRpcRateLimiter {
     this.rateLimit = options?.rateLimit ?? config.globalRpcRateLimit ?? 50; // 50 calls/sec default
     this.burstCapacity = options?.burstCapacity ?? config.globalRpcBurstCapacity ?? 100;
     this.refillIntervalMs = options?.refillIntervalMs ?? 100; // 100ms refill interval
+    this.maxInFlight = config.ethCallMaxInFlight ?? 120; // 120 concurrent calls default
     
     // Calculate tokens per refill: (rateLimit * refillInterval) / 1000
     this.tokensPerRefill = (this.rateLimit * this.refillIntervalMs) / 1000;
@@ -58,7 +66,7 @@ export class GlobalRpcRateLimiter {
     console.log(
       `[rpc-rate-limiter] Initialized: rate=${this.rateLimit}/s, ` +
       `burst=${this.burstCapacity}, refillInterval=${this.refillIntervalMs}ms, ` +
-      `tokensPerRefill=${this.tokensPerRefill.toFixed(2)}`
+      `tokensPerRefill=${this.tokensPerRefill.toFixed(2)}, maxInFlight=${this.maxInFlight}`
     );
     
     // Start refill timer
@@ -190,8 +198,64 @@ export class GlobalRpcRateLimiter {
       burstCapacity: this.burstCapacity,
       rateLimit: this.rateLimit,
       totalWaits: this.totalWaits,
-      totalDrops: this.totalDrops
+      totalDrops: this.totalDrops,
+      inFlightCalls: this.inFlightCalls,
+      maxInFlight: this.maxInFlight,
+      totalInFlightWaits: this.totalInFlightWaits
     };
+  }
+  
+  /**
+   * Acquire an in-flight call slot (semaphore)
+   * Returns true if acquired, false if would exceed max in-flight
+   */
+  public async acquireInFlight(timeoutMs = 5000): Promise<boolean> {
+    if (this.inFlightCalls < this.maxInFlight) {
+      this.inFlightCalls++;
+      return true;
+    }
+    
+    // Wait for a slot to become available
+    this.totalInFlightWaits++;
+    const startTime = Date.now();
+    
+    return new Promise<boolean>((resolve) => {
+      const checkTimeout = () => {
+        if (Date.now() - startTime >= timeoutMs) {
+          // Remove from queue and timeout
+          const idx = this.inFlightWaitQueue.indexOf(resolver);
+          if (idx >= 0) {
+            this.inFlightWaitQueue.splice(idx, 1);
+          }
+          resolve(false);
+        }
+      };
+      
+      const resolver = () => {
+        this.inFlightCalls++;
+        resolve(true);
+      };
+      
+      this.inFlightWaitQueue.push(resolver);
+      
+      // Set timeout
+      setTimeout(checkTimeout, timeoutMs);
+    });
+  }
+  
+  /**
+   * Release an in-flight call slot
+   */
+  public releaseInFlight(): void {
+    if (this.inFlightCalls > 0) {
+      this.inFlightCalls--;
+      
+      // Wake up waiting callers
+      const next = this.inFlightWaitQueue.shift();
+      if (next) {
+        next();
+      }
+    }
   }
   
   /**
@@ -203,7 +267,8 @@ export class GlobalRpcRateLimiter {
     }
     
     console.log(
-      `[rpc-rate-limiter] Stopped: waits=${this.totalWaits} drops=${this.totalDrops}`
+      `[rpc-rate-limiter] Stopped: waits=${this.totalWaits} drops=${this.totalDrops} ` +
+      `inFlightWaits=${this.totalInFlightWaits}`
     );
   }
   
