@@ -372,11 +372,12 @@ async function computeTwap(provider, poolAddress, windowSec) {
     const secondsAgos = [0, windowSec];
     const [tickCumulatives] = await pool.observe(secondsAgos);
 
-    // BigInt-safe math: compute tick delta directly
-    const tickCum0 = tickCumulatives[0];  // most recent (t=now)
-    const tickCum1 = tickCumulatives[1];  // older (t=now-window)
-    const tickDelta = Number(tickCum0 - tickCum1);
-    const avgTick = tickDelta / windowSec;
+    // BigInt-safe math: compute tick delta and average tick
+    // Avoid Number() on large cumulatives to prevent precision loss
+    const delta = tickCumulatives[0] - tickCumulatives[1];  // Keep as BigInt
+    const time = BigInt(windowSec);
+    // Split into integer and fractional parts for precision
+    const avgTick = Number(delta / time) + Number(delta % time) / Number(time);
 
     // Convert tick to price: price = 1.0001^avgTick
     // This represents token1 per token0

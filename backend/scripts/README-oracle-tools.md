@@ -319,6 +319,29 @@ Failed: 0
 - If using `--twap-pools`, ensure proper quoting (single quotes may not work in CMD)
 - PowerShell users: escape quotes properly or use a JSON file
 
+### Technical Notes
+
+**BigInt-Safe TWAP Calculation:**
+
+The TWAP calculation uses BigInt arithmetic to avoid precision loss with large tick cumulative values:
+
+```javascript
+const delta = tickCumulatives[0] - tickCumulatives[1];  // Keep as BigInt
+const time = BigInt(windowSec);
+const avgTick = Number(delta / time) + Number(delta % time) / Number(time);
+```
+
+**Why this matters:**
+- Tick cumulatives grow unbounded over time (they represent cumulative time-weighted ticks since pool creation)
+- Converting large BigInt values directly to Number can lose precision or cause overflow
+- By keeping the delta calculation in BigInt and only converting the final average, we preserve accuracy
+- The formula splits the division into integer and fractional parts for maximum precision
+
+**Price Normalization:**
+- TWAP price represents `token1/token0` (e.g., for WETH/USDC pool: USDC per WETH)
+- For pools where token0=WETH and token1=USDC, TWAP gives USD-equivalent price directly comparable to Chainlink's WETH/USD feed
+- Always verify token0/token1 addresses in output to ensure correct price interpretation
+
 ## Common Workflows
 
 ### Initial Setup
